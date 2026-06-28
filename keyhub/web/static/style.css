@@ -55,6 +55,47 @@
   --font-mono: 'JetBrains Mono', "SFMono-Regular", Consolas, "Liberation Mono", monospace;
 }
 
+/* ===== 亮色主题变量 ===== */
+[data-theme="light"] {
+  /* —— 基础色阶：明亮通透 —— */
+  --bg-0: #f5f7fa;
+  --bg-1: #ffffff;
+  --bg-2: #eef1f6;
+  --panel: #ffffff;
+  --panel-2: #f0f3f8;
+  --panel-3: #e4e8f0;
+  --border: #d4dae5;
+  --border-soft: #e0e5ee;
+  --border-glow: rgba(13, 155, 106, 0.25);
+
+  /* —— 文字 —— */
+  --text: #1a2030;
+  --text-2: #4a5568;
+  --muted: #8896a8;
+  --muted-2: #a0afc0;
+
+  /* —— 强调色：深翡翠绿（亮色下保证对比度） —— */
+  --accent: #0d9b6a;
+  --accent-2: #0a8a5e;
+  --accent-glow: rgba(13, 155, 106, 0.4);
+  --accent-soft: rgba(13, 155, 106, 0.12);
+
+  /* —— 状态色（亮色微调） —— */
+  --danger: #e53e6e;
+  --danger-soft: rgba(229, 62, 110, 0.12);
+  --warn: #d97706;
+  --warn-soft: rgba(217, 119, 6, 0.12);
+  --ok: #0d9b6a;
+  --info: #2b6cb0;
+  --info-soft: rgba(43, 108, 176, 0.12);
+
+  /* —— 阴影调浅 —— */
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.06);
+  --shadow: 0 4px 16px rgba(15, 23, 42, 0.08), 0 1px 3px rgba(15, 23, 42, 0.06);
+  --shadow-lg: 0 12px 40px rgba(15, 23, 42, 0.12), 0 4px 12px rgba(15, 23, 42, 0.06);
+  --shadow-glow: 0 0 24px rgba(13, 155, 106, 0.15);
+}
+
 * { box-sizing: border-box; }
 
 html, body { height: 100%; }
@@ -791,3 +832,126 @@ tbody tr:last-child td { border-bottom: none; }
 
 /* 选中文字 */
 ::selection { background: var(--accent-soft); color: var(--accent); }
+
+/* ============================================================
+   亮色主题适配 / 图表 / 主题切换 / 标签 / 移动端增强
+   ============================================================ */
+
+/* ===== 亮色主题适配 ===== */
+[data-theme="light"] body {
+  background-image:
+    radial-gradient(ellipse 80% 60% at 50% 0%, rgba(13, 155, 106, 0.06), transparent 70%),
+    linear-gradient(180deg, var(--bg-0), var(--bg-1));
+}
+[data-theme="light"] body::before {
+  background-image:
+    linear-gradient(rgba(13, 155, 106, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(13, 155, 106, 0.03) 1px, transparent 1px);
+}
+/* 亮色下卡片去掉磨砂深底，改为更通透的白 */
+[data-theme="light"] .card {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(240, 243, 248, 0.7));
+}
+[data-theme="light"] .stat {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(240, 243, 248, 0.8));
+}
+[data-theme="light"] .nav {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.8), rgba(240, 243, 248, 0.9));
+}
+[data-theme="light"] .toast {
+  background: linear-gradient(180deg, var(--panel-2), var(--panel));
+}
+[data-theme="light"] .secret-box {
+  background: linear-gradient(180deg, var(--bg-1), var(--bg-2));
+  color: var(--accent);
+}
+[data-theme="light"] .modal-backdrop {
+  background: rgba(15, 23, 42, 0.4);
+}
+
+/* ===== 图表 ===== */
+.chart-container {
+  background: var(--bg-1);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  padding: 16px;
+  margin-bottom: 18px;
+  overflow-x: auto;
+}
+.chart-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 160px;
+  min-width: 100%;
+}
+.chart-bar {
+  flex: 1;
+  min-width: 8px;
+  background: linear-gradient(180deg, var(--accent), var(--accent-2));
+  border-radius: 2px 2px 0 0;
+  position: relative;
+  opacity: 0.8;
+  transition: opacity 0.2s;
+  cursor: pointer;
+}
+.chart-bar:hover { opacity: 1; }
+.chart-bar-label {
+  position: absolute;
+  bottom: -20px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 8px;
+  font-family: var(--font-mono);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+/* ===== 主题切换按钮 ===== */
+.theme-toggle {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  width: 32px; height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  font-size: 16px;
+  transition: background 0.2s;
+}
+.theme-toggle:hover { background: var(--panel-3); }
+
+/* ===== 标签显示 ===== */
+.tag-list {
+  display: inline-flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.tag-item {
+  font-size: 10px;
+  padding: 2px 6px;
+  background: var(--accent-soft);
+  border: 1px solid var(--border-glow);
+  border-radius: 3px;
+  color: var(--accent);
+  font-family: var(--font-mono);
+}
+
+/* ===== 移动端适配 ===== */
+@media (max-width: 768px) {
+  .container { padding: 16px 12px 40px; }
+  .nav { padding: 10px 14px; margin-bottom: 18px; }
+  .nav .logo { font-size: 16px; }
+  .nav .brand-sub { display: none; }
+  .stats { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+  .row { flex-direction: column; }
+  .row > * { width: 100%; }
+  .tabs { padding-bottom: 0; }
+  .tab { padding: 10px 12px; font-size: 12px; }
+  table { font-size: 11px; }
+  thead th, tbody td { padding: 8px 6px; }
+  .card { padding: 16px; }
+  h1 { font-size: 22px; }
+  .center-card { max-width: 100%; }
+}

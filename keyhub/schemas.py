@@ -17,6 +17,7 @@ class CredentialCreate(BaseModel):
     type: CredentialType = CredentialType.password
     value: str = Field(..., min_length=1)  # 明文，仅用于加密入库
     metadata: dict[str, Any] = Field(default_factory=dict)
+    tags: list[str] = Field(default_factory=list)
     expires_at: datetime | None = None
     rotation_days: int | None = None
     # LLM 扩展
@@ -24,11 +25,14 @@ class CredentialCreate(BaseModel):
     label: str | None = None
     allowed_models: list[str] = Field(default_factory=list)
     priority: int = 0
+    weight: int = 1
+    monthly_budget_usd: float = 0.0
 
 
 class CredentialUpdate(BaseModel):
     value: str | None = None
     metadata: dict[str, Any] | None = None
+    tags: list[str] | None = None
     expires_at: datetime | None = None
     rotation_days: int | None = None
     rotation_note: str | None = None
@@ -39,6 +43,7 @@ class CredentialOut(BaseModel):
     name: str
     type: CredentialType
     metadata: dict[str, Any]
+    tags: list[str] = Field(default_factory=list)
     expires_at: datetime | None
     rotation_days: int | None
     created_at: datetime
@@ -50,6 +55,8 @@ class CredentialOut(BaseModel):
     llm_status: LLMKeyStatus | None = None
     total_requests: int | None = None
     estimated_cost_usd: float | None = None
+    monthly_budget_usd: float | None = None
+    avg_latency_ms: int | None = None
 
 
 class CredentialSecret(BaseModel):
@@ -60,6 +67,7 @@ class CredentialSecret(BaseModel):
     type: CredentialType
     value: str
     metadata: dict[str, Any]
+    tags: list[str] = Field(default_factory=list)
 
 
 # ===== LLM 用量 =====
@@ -87,10 +95,13 @@ class LLMKeySummary(BaseModel):
     label: str
     status: LLMKeyStatus
     priority: int
+    weight: int = 1
+    monthly_budget_usd: float = 0.0
     total_requests: int
     total_prompt_tokens: int
     total_completion_tokens: int
     estimated_cost_usd: float
+    avg_latency_ms: int = 0
     cooldown_until: datetime | None
     last_rotated_at: datetime | None
 

@@ -66,3 +66,17 @@ def list_logs(
             }
             for r in rows
         ]
+
+
+def cleanup_old_logs(retention_days: int) -> int:
+    """清理超过保留期的审计日志。返回删除的条数。"""
+    if retention_days <= 0:
+        return 0
+    from datetime import timedelta
+    cutoff = datetime.utcnow() - timedelta(days=retention_days)
+    from sqlalchemy import delete
+    with session_scope() as s:
+        result = s.execute(
+            delete(AuditLog).where(AuditLog.created_at < cutoff)
+        )
+        return result.rowcount or 0

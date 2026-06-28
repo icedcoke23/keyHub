@@ -41,6 +41,17 @@ function esc(s) {
   }[c]));
 }
 
+// ===== 主题切换 =====
+window.toggleTheme = function () {
+  const current = document.documentElement.dataset.theme || 'dark';
+  const next = current === 'dark' ? 'light' : 'dark';
+  document.documentElement.dataset.theme = next;
+  localStorage.setItem('keyhub-theme', next);
+};
+// 初始化主题（尽早应用，避免主题闪烁）
+const savedTheme = localStorage.getItem('keyhub-theme');
+if (savedTheme) document.documentElement.dataset.theme = savedTheme;
+
 // ===== Toast 通知系统 =====
 function toast(msg, type = 'info', duration = 3500) {
   const container = el('toast-container');
@@ -113,6 +124,17 @@ window.addEventListener('DOMContentLoaded', () => {
   loadLLM();
   loadStats();
   // 审计/Token 懒加载（切 tab 时再加载）
+
+  // ===== 全局快捷键 =====
+  document.addEventListener('keydown', (e) => {
+    // 忽略输入框中的按键
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
+    if (e.key === '/') { e.preventDefault(); el('c-search')?.focus(); }
+    if (e.key === 'Escape') { closeSecret(); closeTokenModal(); }
+    // 数字键 1-6 切换 tab
+    const tabMap = {'1': 'creds', '2': 'llm', '3': 'usage', '4': 'rotation', '5': 'audit', '6': 'security'};
+    if (tabMap[e.key] && !e.ctrlKey && !e.metaKey) { switchTab(tabMap[e.key]); }
+  });
 });
 
 function switchTab(name) {
@@ -121,7 +143,7 @@ function switchTab(name) {
     el('t-' + n)?.classList.toggle('active', n === name);
   });
   if (name === 'rotation') loadReminders();
-  if (name === 'usage') loadUsage();
+  if (name === 'usage') { loadUsage(); loadCostTrend(); }
   if (name === 'llm') loadLLM();
   if (name === 'audit') loadAudit();
   if (name === 'security') loadTokens();
@@ -132,26 +154,38 @@ window.switchTab = switchTab;
 async function loadCreds() {
   const tbody = el('cred-tbody');
   if (!tbody) return;
-  tbody.innerHTML = '<tr><td colspan="6"><div class="skeleton" style="height:14px;width:80%"></div></td></tr>';
+  // 读取搜索与标签过滤值
+  const q = el('c-search')?.value || '';
+  const tag = el('c-tag-filter')?.value || '';
+  const params = new URLSearchParams();
+  if (q) params.set('q', q);
+  if (tag) params.set('tag', tag);
+  tbody.innerHTML = '<tr><td colspan="7"><div class="skeleton" style="height:14px;width:80%"></div></td></tr>';
   try {
-    const list = await api('/api/credentials');
+    const list = await api('/api/credentials' + (params.toString() ? '?' + params : ''));
     if (!list.length) {
-      tbody.innerHTML = '<tr><td colspan="6" class="muted" style="text-align:center;padding:24px">暂无凭证，请在上方添加</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="7" class="muted" style="text-align:center;padding:24px">暂无凭证，请在上方添加</td></tr>';
       return;
     }
-    tbody.innerHTML = list.map(c => `
+    tbody.innerHTML = list.map(c => {
+      const tagsHtml = (c.tags && c.tags.length)
+        ? `<div class="tag-list">${c.tags.map(t => `<span class="tag-item">${esc(t)}</span>`).join('')}</div>`
+        : '<span class="muted">-</span>';
+      return `
       <tr>
         <td><strong>${esc(c.name)}</strong></td>
         <td><span class="tag">${esc(c.type)}</span></td>
         <td>${c.provider ? esc(c.provider) + '/' + esc(c.label) : '<span class="muted">-</span>'}</td>
         <td>${c.llm_status ? `<span class="tag ${c.llm_status === 'active' ? 'ok' : 'warn'}">${esc(c.llm_status)}</span>` : '<span class="muted">-</span>'}</td>
         <td>${c.expires_at ? esc(c.expires_at.slice(0, 10)) : '<span class="muted">-</span>'}</td>
+        <td>${tagsHtml}</td>
         <td>
           <button class="small secondary" data-action="reveal" data-name="${esc(c.name)}">查看</button>
           <button class="small secondary" data-action="rotate" data-name="${esc(c.name)}">轮换</button>
           <button class="small danger" data-action="del" data-name="${esc(c.name)}">删</button>
         </td>
-      </tr>`).join('');
+      </tr>`;
+    }).join('');
     tbody.querySelectorAll('button[data-action]').forEach(btn => {
       btn.addEventListener('click', () => {
         const action = btn.dataset.action;
@@ -173,15 +207,26 @@ window.createCred = async function () {
     provider: el('c-provider').value || null,
     label: el('c-label').value || null,
     rotation_days: el('c-rot').value ? parseInt(el('c-rot').value) : null,
+    tags: el('c-tags')?.value ? el('c-tags').value.split(',').map(s => s.trim()).filter(Boolean) : [],
   };
   if (!body.name || !body.value) { err('c-err', '名称和明文值必填'); return; }
   err('c-err', '');
   try {
     await postJSON('/api/credentials', body);
     toast(`凭证 ${body.name} 已创建`, 'success');
-    ['c-name', 'c-value', 'c-provider', 'c-label', 'c-rot'].forEach(i => el(i).value = '');
+    ['c-name', 'c-value', 'c-provider', 'c-label', 'c-rot', 'c-tags'].forEach(i => { const e = el(i); if (e) e.value = ''; });
     loadCreds(); loadStats();
   } catch (e) { err('c-err', e.message); }
+};
+
+// ===== 密码生成器 =====
+window.genPassword = async function () {
+  try {
+    const r = await api('/api/credentials/utils/generate-password?length=20');
+    el('c-value').value = r.password;
+    el('c-value').type = 'text';
+    toast(`已生成密码（强度: ${r.strength.label}）`, 'success', 3000);
+  } catch (e) { toast(e.message, 'error'); }
 };
 
 window.reveal = async function (name) {
@@ -376,6 +421,30 @@ async function loadUsage() {
   } catch (e) { console.error(e); }
 }
 window.loadUsage = loadUsage;
+
+// ===== 成本趋势图（纯 CSS 柱状图）=====
+async function loadCostTrend() {
+  const container = el('cost-trend-chart');
+  if (!container) return;
+  try {
+    const data = await api('/api/llm/cost/trend?days=30');
+    if (!data.length) { container.innerHTML = '<div class="muted" style="text-align:center;padding:24px">暂无数据</div>'; return; }
+    // 按 date 聚合
+    const byDate = {};
+    for (const d of data) {
+      if (!byDate[d.date]) byDate[d.date] = 0;
+      byDate[d.date] += d.cost_usd;
+    }
+    const dates = Object.keys(byDate).sort();
+    const maxCost = Math.max(...Object.values(byDate), 0.01);
+    container.innerHTML = '<div class="chart-bars">' + dates.map(d => {
+      const cost = byDate[d];
+      const h = (cost / maxCost * 100).toFixed(1);
+      return `<div class="chart-bar" style="height:${h}%" title="${d}: $${cost.toFixed(4)}"><span class="chart-bar-label">${d.slice(5)}</span></div>`;
+    }).join('') + '</div>';
+  } catch (e) { container.innerHTML = '<div class="muted">加载失败</div>'; }
+}
+window.loadCostTrend = loadCostTrend;
 
 // ===== Rotation =====
 async function loadReminders() {

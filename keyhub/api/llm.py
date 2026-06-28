@@ -6,6 +6,7 @@ import json
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
+from sqlalchemy import select
 
 from ..audit import record as audit_record
 from ..auth import require_auth, require_scope
@@ -95,3 +96,67 @@ def usage(
 @router.get("/cost")
 def cost(provider: str | None = Query(None), _: str = Depends(require_scope("llm:read"))):
     return aggregate_cost(provider=provider)
+
+
+@router.get("/cost/trend")
+def cost_trend(
+    days: int = Query(30, le=365),
+    _: str = Depends(require_scope("llm:read")),
+):
+    """按天聚合成本趋势，用于 UI 折线图。"""
+    from datetime import datetime, timedelta
+    from sqlalchemy import func, cast, Date
+    from ..db import session_scope
+    from ..models import UsageLog, LLMKey
+
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    with session_scope() as s:
+        rows = s.execute(
+            select(
+                cast(UsageLog.created_at, Date).label("day"),
+                LLMKey.provider,
+                func.sum(UsageLog.cost_usd).label("cost"),
+                func.count(UsageLog.id).label("calls"),
+            )
+            .join(LLMKey, UsageLog.llm_key_id == LLMKey.id)
+            .where(UsageLog.created_at >= cutoff)
+            .group_by("day", LLMKey.provider)
+            .order_by("day")
+        ).all()
+        return [
+            {
+                "date": str(r.day),
+                "provider": r.provider,
+                "cost_usd": round(r.cost or 0, 6),
+                "calls": int(r.calls or 0),
+            }
+            for r in rows
+        ]
+
+
+@router.get("/latency")
+def latency_stats(
+    provider: str | None = Query(None),
+    _: str = Depends(require_scope("llm:read")),
+):
+    """返回各 provider 的 P50/P95/P99 延迟分位数。"""
+    from ..llm.latency_stats import get_latency_stats
+    stats = get_latency_stats()
+    if provider:
+        return {provider: stats.percentiles(provider)}
+    return stats.all_percentiles()
+
+
+@router.post("/cache/clear")
+def clear_cache(_: str = Depends(require_scope("admin:write"))):
+    """清空 LLM 响应缓存。"""
+    from ..llm.cache import get_cache
+    n = get_cache().clear()
+    return {"message": f"cleared {n} cache entries"}
+
+
+@router.get("/cache/stats")
+def cache_stats(_: str = Depends(require_scope("llm:read"))):
+    """返回缓存统计。"""
+    from ..llm.cache import get_cache
+    return get_cache().stats()

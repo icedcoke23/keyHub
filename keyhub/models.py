@@ -82,6 +82,9 @@ class Credential(Base):
     # 元信息（不加密，但不含敏感数据）：URL、用户名、备注等
     metadata_: Mapped[dict] = mapped_column("metadata", JSON, default=dict)
 
+    # 标签（多标签筛选，不含敏感数据）
+    tags: Mapped[list] = mapped_column(JSON, default=list)
+
     # 过期与轮换
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
     rotation_days: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 建议轮换周期
@@ -142,12 +145,19 @@ class LLMKey(Base):
 
     # 优先级：数值越大越优先；同优先级轮询
     priority: Mapped[int] = mapped_column(Integer, default=0)
+    # 负载均衡权重（strategy=weighted 时使用）
+    weight: Mapped[int] = mapped_column(Integer, default=1)
+
+    # 月度预算上限（USD），超出后自动停用并触发通知；0 = 不限
+    monthly_budget_usd: Mapped[float] = mapped_column(Float, default=0.0)
 
     # 用量汇总（增量更新）
     total_requests: Mapped[int] = mapped_column(Integer, default=0)
     total_prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
     total_completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
     estimated_cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
+    # 最近 N 次调用的平均延迟（毫秒），用于 latency 路由策略
+    avg_latency_ms: Mapped[int] = mapped_column(Integer, default=0)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
@@ -228,19 +238,24 @@ class AuditAction(str, enum.Enum):
     credential_update = "credential.update"
     credential_rotate = "credential.rotate"
     credential_delete = "credential.delete"
+    credential_import = "credential.import"
     # 认证
     auth_unlock = "auth.unlock"
     auth_lock = "auth.lock"
     auth_unlock_failed = "auth.unlock_failed"
     auth_init = "auth.init"
     auth_password_change = "auth.password_change"
+    auth_auto_lock = "auth.auto_lock"            # 空闲自动锁定
     # Token
     token_create = "token.create"
     token_revoke = "token.revoke"
+    token_rate_limited = "token.rate_limited"    # Token 触发限流
     # 系统
     backup_export = "backup.export"
     backup_import = "backup.import"
     llm_proxy_call = "llm.proxy_call"
+    llm_budget_exceeded = "llm.budget_exceeded"  # 预算超限
+    llm_cache_hit = "llm.cache_hit"
 
 
 class AuditLog(Base):

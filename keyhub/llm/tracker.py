@@ -95,10 +95,13 @@ def list_llm_keys(provider: str | None = None) -> list[LLMKeySummary]:
                 label=k.label,
                 status=k.status,
                 priority=k.priority,
+                weight=k.weight,
+                monthly_budget_usd=k.monthly_budget_usd,
                 total_requests=k.total_requests,
                 total_prompt_tokens=k.total_prompt_tokens,
                 total_completion_tokens=k.total_completion_tokens,
                 estimated_cost_usd=k.estimated_cost_usd,
+                avg_latency_ms=k.avg_latency_ms,
                 cooldown_until=k.cooldown_until,
                 last_rotated_at=last_rot,
             )

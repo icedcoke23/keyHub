@@ -93,3 +93,47 @@ def get_limiter() -> LoginRateLimiter:
     if _limiter is None:
         _limiter = LoginRateLimiter()
     return _limiter
+
+
+class TokenRateLimiter:
+    """按 API Token ID 的每分钟请求数限制。
+
+    滑动窗口实现，内存 dict + threading.Lock。
+    """
+    def __init__(self, rpm: int = 60):
+        self.rpm = rpm
+        self._windows: dict[str, list[float]] = {}
+        self._lock = threading.Lock()
+
+    def check(self, token_id: str) -> tuple[bool, int]:
+        """检查是否允许请求。返回 (允许, 剩余配额)。"""
+        if self.rpm <= 0:
+            return True, -1
+        now = time.monotonic()
+        window_start = now - 60.0
+        with self._lock:
+            timestamps = self._windows.get(token_id, [])
+            # 清理过期时间戳
+            timestamps = [t for t in timestamps if t > window_start]
+            if len(timestamps) >= self.rpm:
+                self._windows[token_id] = timestamps
+                return False, 0
+            timestamps.append(now)
+            self._windows[token_id] = timestamps
+            return True, self.rpm - len(timestamps)
+
+    def reset(self, token_id: str | None = None):
+        with self._lock:
+            if token_id is None:
+                self._windows.clear()
+            else:
+                self._windows.pop(token_id, None)
+
+_token_limiter: TokenRateLimiter | None = None
+
+def get_token_limiter() -> TokenRateLimiter:
+    global _token_limiter
+    if _token_limiter is None:
+        from .config import get_settings
+        _token_limiter = TokenRateLimiter(rpm=get_settings().token_rpm_limit)
+    return _token_limiter

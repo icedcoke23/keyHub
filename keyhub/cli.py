@@ -461,5 +461,102 @@ def backup_import(
     )
 
 
+# ===== 密码生成器 =====
+
+@app.command(name="gen-password")
+def gen_password(
+    length: int = typer.Option(20, "--length", "-l", help="密码长度"),
+    no_symbols: bool = typer.Option(False, "--no-symbols", help="不包含符号"),
+    no_digits: bool = typer.Option(False, "--no-digits", help="不包含数字"),
+    no_upper: bool = typer.Option(False, "--no-upper", help="不包含大写字母"),
+    exclude_similar: bool = typer.Option(True, "--include-similar/--exclude-similar", help="排除易混淆字符"),
+):
+    """生成密码学安全的随机密码。"""
+    from .crypto import generate_password, password_strength
+    pw = generate_password(
+        length=length,
+        upper=not no_upper,
+        digits=not no_digits,
+        symbols=not no_symbols,
+        exclude_similar=exclude_similar,
+    )
+    strength = password_strength(pw)
+    colors = {0: "red", 1: "red", 2: "yellow", 3: "green", 4: "green"}
+    console.print(f"[bold]{pw}[/bold]")
+    console.print(f"强度: [{colors.get(strength['score'], 'white')}]{strength['label']}[/{colors.get(strength['score'], 'white')}] "
+                  f"(熵: {strength['entropy_bits']:.1f} bits)")
+    if strength["issues"]:
+        for issue in strength["issues"]:
+            console.print(f"  [yellow]⚠ {issue}[/yellow]")
+
+
+# ===== 凭证健康检查 =====
+
+@app.command(name="health-check")
+def health_check(
+    name: str = typer.Argument(..., help="凭证名称"),
+):
+    """检查凭证强度、重复使用情况。"""
+    _ensure_unlocked()
+    from .store import reveal_credential, list_credentials
+    from .crypto import password_strength
+
+    try:
+        secret = reveal_credential(name, actor="health-check")
+    except KeyError:
+        console.print(f"[red]凭证 '{name}' 不存在[/red]")
+        raise typer.Exit(1)
+
+    strength = password_strength(secret.value)
+    colors = {0: "red", 1: "red", 2: "yellow", 3: "green", 4: "green"}
+
+    table = Table(show_header=False)
+    table.add_column("k", style="cyan")
+    table.add_column("v")
+    table.add_row("凭证", name)
+    table.add_row("类型", secret.type.value)
+    table.add_row("强度", f"[{colors.get(strength['score'], 'white')}]{strength['label']}[/{colors.get(strength['score'], 'white')}]")
+    table.add_row("熵(bits)", f"{strength['entropy_bits']:.1f}")
+    if strength["issues"]:
+        table.add_row("问题", "\n".join(f"⚠ {i}" for i in strength["issues"]))
+
+    # 重复检测
+    duplicates = []
+    all_creds = list_credentials()
+    for c in all_creds:
+        if c.name == name:
+            continue
+        try:
+            other = reveal_credential(c.name, actor="health-check")
+            if other.value == secret.value:
+                duplicates.append(c.name)
+        except Exception:
+            pass
+    if duplicates:
+        table.add_row("重复使用", "[red]" + ", ".join(duplicates) + "[/red]")
+    else:
+        table.add_row("重复使用", "[green]无[/green]")
+
+    console.print(table)
+
+
+# ===== TOTP =====
+
+@app.command(name="totp-generate")
+def totp_generate(
+    account: str = typer.Argument(..., help="账户标识（如邮箱）"),
+    issuer: str = typer.Option("KeyHub", "--issuer", help="发行者名称"),
+):
+    """生成 TOTP 密钥（用于 2FA）。"""
+    from .crypto import generate_totp_secret, generate_totp_uri
+    secret = generate_totp_secret()
+    uri = generate_totp_uri(secret, account, issuer)
+    console.print("[green]TOTP 密钥（请安全保存）：[/green]")
+    console.print(f"[bold]{secret}[/bold]")
+    console.print(f"\n[dim]otpauth URI（可生成二维码）：[/dim]")
+    console.print(f"[dim]{uri}[/dim]")
+    console.print("\n[yellow]⚠ 此密钥仅显示一次，请立即保存到安全位置。[/yellow]")
+
+
 if __name__ == "__main__":
     app()
