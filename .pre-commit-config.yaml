@@ -1,0 +1,24 @@
+# pre-commit 配置 — 安装: pip install pre-commit && pre-commit install
+# 会安装 git hook，在每次 commit 前自动扫描密钥
+
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.4
+    hooks:
+      - id: gitleaks
+        args: [--config, .gitleaks.toml]
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=500]
+      - id: detect-private-key
+        # 已被 gitleaks 覆盖，但作为冗余保护保留
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.4.0
+    hooks:
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
