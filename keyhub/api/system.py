@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
+from ..auth import require_auth
+from ..notify import get_notifier
 from ..runtime import get_runtime
 
 router = APIRouter(tags=["system"])
@@ -23,3 +25,10 @@ def status():
         "locked": s.locked,
         "unlocked": rt.unlocked,
     }
+
+
+@router.post("/api/notify/test")
+def test_notify(_: str = Depends(require_auth)):
+    """发送一条测试通知，用于验证 Webhook / 邮件配置。"""
+    get_notifier().notify("test.notification", {"message": "test from KeyHub API"})
+    return {"message": "notification sent"}

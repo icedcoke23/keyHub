@@ -11,7 +11,6 @@ from ..schemas import (
     CredentialSecret,
     CredentialUpdate,
     MessageOut,
-    RotationReminder,
 )
 from ..store import (
     create_credential,
@@ -28,9 +27,9 @@ router = APIRouter(prefix="/api/credentials", tags=["credentials"])
 
 
 @router.post("", response_model=CredentialOut)
-def create(body: CredentialCreate, _: str = Depends(require_auth)):
+def create(body: CredentialCreate, actor: str = Depends(require_auth)):
     try:
-        return create_credential(body)
+        return create_credential(body, actor=actor)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -52,18 +51,18 @@ def get(name: str, _: str = Depends(require_auth)):
 
 
 @router.get("/{name}/reveal", response_model=CredentialSecret)
-def reveal(name: str, _: str = Depends(require_auth)):
-    """返回明文 —— 谨慎使用，会被记入审计日志（未来）。"""
+def reveal(name: str, actor: str = Depends(require_auth)):
+    """返回明文 —— 谨慎使用，会被记入审计日志。"""
     try:
-        return reveal_credential(name)
+        return reveal_credential(name, actor=actor)
     except KeyError:
         raise HTTPException(404, f"credential '{name}' not found")
 
 
 @router.patch("/{name}", response_model=CredentialOut)
-def update(name: str, body: CredentialUpdate, _: str = Depends(require_auth)):
+def update(name: str, body: CredentialUpdate, actor: str = Depends(require_auth)):
     try:
-        return update_credential(name, body)
+        return update_credential(name, body, actor=actor)
     except KeyError:
         raise HTTPException(404, f"credential '{name}' not found")
 
@@ -73,18 +72,18 @@ def rotate(
     name: str,
     new_value: str = Query(..., description="new plaintext value"),
     note: str | None = Query(None),
-    _: str = Depends(require_auth),
+    actor: str = Depends(require_auth),
 ):
     try:
-        return rotate_credential(name, new_value, note)
+        return rotate_credential(name, new_value, note, actor=actor)
     except KeyError:
         raise HTTPException(404, f"credential '{name}' not found")
 
 
 @router.delete("/{name}", response_model=MessageOut)
-def delete(name: str, _: str = Depends(require_auth)):
+def delete(name: str, actor: str = Depends(require_auth)):
     try:
-        delete_credential(name)
+        delete_credential(name, actor=actor)
         return MessageOut(message="deleted")
     except KeyError:
         raise HTTPException(404, f"credential '{name}' not found")

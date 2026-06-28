@@ -52,6 +52,17 @@ class Settings(BaseSettings):
     # Web UI
     web_ui: bool = True
 
+    # 通知
+    notify_webhook_url: str = ""           # 通用 Webhook（POST JSON）
+    notify_webhook_secret: str = ""        # Webhook 签名密钥（X-KeyHub-Signature = hmac-sha256）
+    notify_email_enabled: bool = False
+    notify_email_smtp_host: str = ""
+    notify_email_smtp_port: int = 587
+    notify_email_smtp_user: str = ""
+    notify_email_smtp_password: str = ""
+    notify_email_from: str = ""
+    notify_email_to: str = ""              # 逗号分隔多个收件人
+
     @property
     def db_url(self) -> str:
         path = Path(self.db_path)

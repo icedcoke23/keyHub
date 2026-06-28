@@ -8,8 +8,10 @@ from typing import Any
 
 from sqlalchemy import select
 
+from .audit import record as audit_record
 from .db import session_scope
 from .models import (
+    AuditAction,
     Credential,
     CredentialType,
     LLMKey,
@@ -60,7 +62,7 @@ def _to_out(c: Credential) -> CredentialOut:
 
 # ===== 创建 =====
 
-def create_credential(data: CredentialCreate) -> CredentialOut:
+def create_credential(data: CredentialCreate, actor: str = "system") -> CredentialOut:
     with session_scope() as s:
         existing = s.execute(
             select(Credential).where(Credential.name == data.name)
@@ -94,7 +96,10 @@ def create_credential(data: CredentialCreate) -> CredentialOut:
 
         s.flush()
         s.refresh(cred)
-        return _to_out(cred)
+        out = _to_out(cred)
+    audit_record(AuditAction.credential_create, actor, target=data.name,
+                 detail={"type": data.type.value})
+    return out
 
 
 # ===== 列表 =====
@@ -128,7 +133,7 @@ def get_credential(name: str) -> CredentialOut:
 
 # ===== 取明文 =====
 
-def reveal_credential(name: str) -> CredentialSecret:
+def reveal_credential(name: str, actor: str = "system") -> CredentialSecret:
     with session_scope() as s:
         c = s.execute(
             select(Credential).where(Credential.name == name)
@@ -136,18 +141,22 @@ def reveal_credential(name: str) -> CredentialSecret:
         if c is None:
             raise KeyError(name)
         value = _decrypt(c.encrypted_value)
-        return CredentialSecret(
+        out = CredentialSecret(
             id=c.id,
             name=c.name,
             type=c.type,
             value=value,
             metadata=c.metadata_ or {},
         )
+    # reveal 是最敏感的操作，必须审计；记录目标与类型，不记录明文
+    audit_record(AuditAction.credential_reveal, actor, target=name,
+                 detail={"type": out.type.value})
+    return out
 
 
 # ===== 更新 / 轮换 =====
 
-def update_credential(name: str, data: CredentialUpdate) -> CredentialOut:
+def update_credential(name: str, data: CredentialUpdate, actor: str = "system") -> CredentialOut:
     with session_scope() as s:
         c = s.execute(
             select(Credential).where(Credential.name == name)
@@ -183,19 +192,26 @@ def update_credential(name: str, data: CredentialUpdate) -> CredentialOut:
 
         s.flush()
         s.refresh(c)
-        return _to_out(c)
+        out = _to_out(c)
+    audit_record(
+        AuditAction.credential_rotate if rotated else AuditAction.credential_update,
+        actor, target=name,
+        detail={"rotated": rotated, "old_fingerprint": old_fp} if rotated else {},
+    )
+    return out
 
 
-def rotate_credential(name: str, new_value: str, note: str | None = None) -> CredentialOut:
+def rotate_credential(name: str, new_value: str, note: str | None = None,
+                      actor: str = "system") -> CredentialOut:
     return update_credential(name, CredentialUpdate(
         value=new_value,
         rotation_note=note or "manual rotation",
-    ))
+    ), actor=actor)
 
 
 # ===== 删除（软删除） =====
 
-def delete_credential(name: str) -> None:
+def delete_credential(name: str, actor: str = "system") -> None:
     with session_scope() as s:
         c = s.execute(
             select(Credential).where(Credential.name == name)
@@ -203,3 +219,4 @@ def delete_credential(name: str) -> None:
         if c is None:
             raise KeyError(name)
         c.deleted = True
+    audit_record(AuditAction.credential_delete, actor, target=name)

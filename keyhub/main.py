@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from .api import auth as auth_api
+from .api import audit as audit_api
 from .api import credentials as cred_api
 from .api import llm as llm_api
 from .api import rotation as rot_api
@@ -20,10 +21,26 @@ from .rotation import get_checker
 async def lifespan(app: FastAPI):
     # 启动
     init_db()
+    from .notify import get_notifier
+
+    def _on_remind(reminders):
+        notifier = get_notifier()
+        payload = {
+            "count": len(reminders),
+            "items": [
+                {
+                    "name": r.name,
+                    "type": r.type.value,
+                    "days_until_expire": r.days_until_expire,
+                    "days_since_rotation": r.days_since_rotation,
+                }
+                for r in reminders
+            ],
+        }
+        notifier.notify("rotation.reminder", payload)
+
     checker = get_checker()
-    checker.start(on_remind=lambda rs: print(
-        f"[rotation] {len(rs)} credential(s) need rotation", flush=True
-    ))
+    checker.start(on_remind=_on_remind)
     yield
     # 关闭
     checker.stop()
@@ -44,6 +61,7 @@ def create_app() -> FastAPI:
     app.include_router(cred_api.router)
     app.include_router(llm_api.router)
     app.include_router(rot_api.router)
+    app.include_router(audit_api.router)
 
     # Web UI
     if settings.web_ui:

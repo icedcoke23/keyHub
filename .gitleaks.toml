@@ -1,0 +1,64 @@
+# gitleaks 配置 — 防止明文密钥提交
+# 文档: https://github.com/gitleaks/gitleaks
+
+title = "KeyHub gitleaks config"
+
+[allowlist]
+description = "允许的路径与文件（非密钥，仅示例/配置）"
+paths = [
+  '''\.git/.*''',
+  '''\.env\.example''',
+  '''SECURITY\.md''',
+  '''README\.md''',
+  # 测试文件中可能含 fake key 字样（如 sk-test-abc）
+  '''tests/.*''',
+]
+# 测试用的假 key 模式（不会误报）
+regexes = [
+  '''sk-test-[a-z]+''',
+  '''khub_[0-9a-f]+''',  # API token 仅创建时返回，不会出现在代码中
+]
+
+[[rules]]
+id = "openai-api-key"
+description = "OpenAI API key"
+regex = '''sk-[A-Za-z0-9]{40,}'''
+tags = ["key", "openai"]
+
+[[rules]]
+id = "anthropic-api-key"
+description = "Anthropic API key"
+regex = '''sk-ant-[A-Za-z0-9_\-]{80,}'''
+tags = ["key", "anthropic"]
+
+[[rules]]
+id = "github-pat"
+description = "GitHub Personal Access Token"
+regex = '''gh[pousr]_[A-Za-z0-9]{36,}'''
+tags = ["key", "github"]
+
+[[rules]]
+id = "generic-api-key"
+description = "Generic API key (key=... / api_key=...)"
+regex = '''(?i)(api[_-]?key|secret|token|password)["'\s:=]+["']?[A-Za-z0-9_\-]{20,}["']?'''
+tags = ["key", "generic"]
+  [[rules.allowlist]]
+  # 允许测试占位与配置项名
+  regexes = [
+    '''KEYHUB_[A-Z_]+''',
+    '''example''',
+    '''your-.*-here''',
+    '''<.*>''',
+  ]
+
+[[rules]]
+id = "private-key"
+description = "Private key (PEM)"
+regex = '''-----BEGIN (RSA |EC |OPENSSH |)PRIVATE KEY-----'''
+tags = ["key", "pem"]
+
+[[rules]]
+id = "aws-access-key"
+description = "AWS Access Key"
+regex = '''AKIA[0-9A-Z]{16}'''
+tags = ["key", "aws"]

@@ -2,22 +2,47 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+import json
 
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
+
+from ..audit import record as audit_record
 from ..auth import require_auth
 from ..llm.balancer import get_balancer
-from ..llm.proxy import LLMProxyError, chat
+from ..llm.proxy import LLMProxyError, chat, chat_stream
 from ..llm.tracker import aggregate_cost, list_llm_keys, list_usage
-from ..models import LLMKeyStatus
+from ..models import AuditAction, LLMKeyStatus
 from ..schemas import LLMChatRequest, LLMKeySummary, MessageOut, UsageOut
 
 router = APIRouter(prefix="/api/llm", tags=["llm"])
 
 
 @router.post("/chat")
-def chat_endpoint(body: LLMChatRequest, _: str = Depends(require_auth)):
-    """通过 KeyHub 代理调用 LLM。下游无需接触真实 key。"""
+def chat_endpoint(body: LLMChatRequest, actor: str = Depends(require_auth)):
+    """通过 KeyHub 代理调用 LLM（非流式）。下游无需接触真实 key。"""
+    if body.stream:
+        # 流式：返回 SSE 透传
+        def _gen():
+            try:
+                yield from chat_stream(
+                    provider=body.provider,
+                    model=body.model,
+                    messages=body.messages,
+                    temperature=body.temperature,
+                    max_tokens=body.max_tokens,
+                    extra=body.extra or None,
+                )
+                yield b"data: [DONE]\n\n"
+            except LLMProxyError as e:
+                yield f"data: {json.dumps({'error': str(e)})}\n\n".encode("utf-8")
+
+        audit_record(AuditAction.llm_proxy_call, actor,
+                     target=body.provider, detail={"model": body.model, "stream": True})
+        return StreamingResponse(_gen(), media_type="text/event-stream")
     try:
+        audit_record(AuditAction.llm_proxy_call, actor,
+                     target=body.provider, detail={"model": body.model, "stream": False})
         return chat(
             provider=body.provider,
             model=body.model,

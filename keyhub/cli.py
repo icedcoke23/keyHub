@@ -356,6 +356,43 @@ def rotation_check():
     console.print(table)
 
 
+@app.command(name="change-password")
+def change_password(
+    old: Optional[str] = typer.Option(None, "--old", "-o", help="旧主密码；不提供则交互输入"),
+    new: Optional[str] = typer.Option(None, "--new", "-n", help="新主密码；不提供则交互输入"),
+):
+    """变更主密码（重新加密所有凭证）。"""
+    rt = get_runtime()
+    if not rt.is_initialized():
+        console.print("[red]未初始化[/red]")
+        raise typer.Exit(1)
+    if not rt.unlocked:
+        old_pw = old or os.environ.get("KEYHUB_MASTER_PASSWORD") or Prompt.ask("旧主密码", password=True)
+        if not rt.unlock(old_pw):
+            console.print("[red]旧主密码错误[/red]")
+            raise typer.Exit(1)
+        old = old_pw
+    else:
+        if not old:
+            old = Prompt.ask("旧主密码（验证）", password=True)
+    new_pw = new or Prompt.ask("新主密码（至少 8 位）", password=True)
+    new_pw2 = Prompt.ask("确认新主密码", password=True)
+    if new_pw != new_pw2:
+        console.print("[red]两次新密码不一致[/red]")
+        raise typer.Exit(1)
+    try:
+        n = rt.change_master_password(old, new_pw)
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1)
+    console.print(f"[green]主密码已变更，重新加密 {n} 条凭证[/green]")
+    # 记审计
+    from .audit import record as audit_record
+    from .models import AuditAction
+    audit_record(AuditAction.auth_password_change, "master",
+                 detail={"reencrypted": n})
+
+
 @app.command(name="token-create")
 def token_create(
     name: str = typer.Argument(..., help="Token 名称"),
@@ -368,6 +405,60 @@ def token_create(
     console.print("[green]API Token（仅显示一次）:[/green]")
     console.print(f"[bold]{raw}[/bold]")
     console.print("\n使用方式: curl -H 'Authorization: Bearer <token>' http://localhost:8000/api/credentials")
+
+
+@app.command(name="notify-test")
+def notify_test():
+    """发送一条测试通知（Webhook / 邮件 / 控制台）。"""
+    from .notify import get_notifier
+    get_notifier().notify("test.notification", {"message": "this is a test from KeyHub CLI"})
+    console.print("[green]测试通知已发送（查看控制台输出 / Webhook / 邮箱）[/green]")
+
+
+@app.command(name="backup-export")
+def backup_export(
+    output: str = typer.Argument(..., help="输出文件路径（.khbak）"),
+    password: Optional[str] = typer.Option(None, "--password", "-p", help="备份密码；不提供则交互输入"),
+):
+    """导出所有凭证到加密备份文件（.khbak）。
+
+    备份密码独立于主密码，建议使用不同的强密码。
+    """
+    _ensure_unlocked()
+    from .backup import export_backup
+    pw = password or Prompt.ask("备份密码（用于加密备份文件）", password=True)
+    if not password:  # 仅交互输入时要求二次确认
+        pw2 = Prompt.ask("确认备份密码", password=True)
+        if pw != pw2:
+            console.print("[red]两次密码不一致[/red]")
+            raise typer.Exit(1)
+    if len(pw) < 8:
+        console.print("[red]备份密码至少 8 位[/red]")
+        raise typer.Exit(1)
+    result = export_backup(output, pw)
+    console.print(f"[green]已导出 {result['count']} 条凭证到 {result['path']}[/green]")
+    console.print("[yellow]请妥善保管备份文件与密码；该文件含所有凭证明文。[/yellow]")
+
+
+@app.command(name="backup-import")
+def backup_import(
+    input_path: str = typer.Argument(..., help="备份文件路径（.khbak）"),
+    password: Optional[str] = typer.Option(None, "--password", "-p", help="备份密码"),
+    overwrite: bool = typer.Option(False, "--overwrite", help="覆盖同名凭证"),
+):
+    """从加密备份文件导入凭证。"""
+    _ensure_unlocked()
+    from .backup import import_backup
+    pw = password or Prompt.ask("备份密码", password=True)
+    try:
+        result = import_backup(input_path, pw, overwrite=overwrite)
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1)
+    console.print(
+        f"[green]导入完成：新增 {result['imported']}，跳过 {result['skipped']}，"
+        f"覆盖 {result['overwritten']}（备份内共 {result['total_in_backup']} 条）[/green]"
+    )
 
 
 if __name__ == "__main__":
