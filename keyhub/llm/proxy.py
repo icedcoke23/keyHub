@@ -28,6 +28,48 @@ class LLMProxyError(RuntimeError):
     pass
 
 
+def _friendly_error(err: Exception | str) -> str:
+    """将底层异常转换为用户友好的中文提示，隐藏原始堆栈/SSL 细节。"""
+    msg = str(err)
+
+    # 网络/SSL 类错误
+    if "UNEXPECTED_EOF" in msg or "EOF in violation" in msg:
+        return "上游连接异常断开，请检查网络或 LLM 服务可用性"
+    if "SSLError" in msg or "ssl" in msg.lower():
+        return "SSL 握手失败，可能是网络代理或上游证书问题"
+    if "ConnectError" in msg or "ConnectionRefused" in msg:
+        return "无法连接到 LLM 上游服务，请检查网络"
+    if "timeout" in msg.lower() or "timed out" in msg.lower():
+        return "LLM 调用超时，请稍后重试或调整超时设置"
+    if "ConnectTimeout" in msg or "ReadTimeout" in msg:
+        return "LLM 调用超时，请稍后重试或调整超时设置"
+
+    # 限流
+    if "rate_limited" in msg or "429" in msg:
+        return "LLM 上游限流（429），请稍后重试"
+
+    # 鉴权类
+    if "401" in msg or "Unauthorized" in msg:
+        return "LLM API Key 无效或已失效（401），请检查 key"
+    if "403" in msg or "Forbidden" in msg:
+        return "LLM API Key 无权限（403），请检查 key 配置"
+
+    # key 耗尽
+    if "all keys exhausted" in msg or "all retries failed" in msg:
+        return "所有可用 key 已耗尽或全部失败，请检查 key 状态与网络"
+
+    # 上游错误（保留状态码）
+    if "upstream 5" in msg:
+        return "LLM 上游服务异常（5xx），请稍后重试"
+    if "upstream 4" in msg:
+        return "LLM 上游拒绝请求（4xx），请检查模型名与参数"
+
+    # 兜底：截断过长的技术信息
+    if len(msg) > 120:
+        return msg[:120] + "…"
+    return msg
+
+
 def _decrypt_key(llm_key_id: str, credential_encrypted_value: bytes) -> str:
     return get_runtime().vault.decrypt(credential_encrypted_value)
 
@@ -144,8 +186,8 @@ def chat(
             key = balancer.pick(provider, model)
         except NoAvailableKeyError:
             if last_error:
-                raise LLMProxyError(f"all keys exhausted; last error: {last_error}") from last_error
-            raise LLMProxyError(f"no available key for provider='{provider}' model='{model}'") from None
+                raise LLMProxyError(_friendly_error(last_error)) from last_error
+            raise LLMProxyError(f"没有可用的 key（provider={provider}, model={model}），请在控制台添加") from None
 
         # 取明文 key：需要关联的 credential.encrypted_value
         from ..models import Credential, LLMKey
@@ -230,8 +272,8 @@ def chat(
 
     # 全部重试失败
     if last_error:
-        raise LLMProxyError(f"all retries failed; last error: {last_error}") from last_error
-    raise LLMProxyError("chat failed for unknown reason")
+        raise LLMProxyError(_friendly_error(last_error)) from last_error
+    raise LLMProxyError("调用失败，原因未知")
 
 
 # ===== 流式 =====
@@ -279,8 +321,8 @@ def chat_stream(
             key = balancer.pick(provider, model)
         except NoAvailableKeyError:
             if last_error:
-                raise LLMProxyError(f"all keys exhausted; last error: {last_error}") from last_error
-            raise LLMProxyError(f"no available key for provider='{provider}' model='{model}'") from None
+                raise LLMProxyError(_friendly_error(last_error)) from last_error
+            raise LLMProxyError(f"没有可用的 key（provider={provider}, model={model}），请在控制台添加") from None
 
         with session_scope() as s:
             row = s.execute(
@@ -355,14 +397,14 @@ def chat_stream(
                 # 流已经开始则无法重试（下游已收到部分数据），记录失败并结束
                 _record_failed(key.id, model, prompt_tokens, completion_tokens,
                                latency_ms, str(e), provider)
-                raise LLMProxyError(f"stream interrupted: {e}") from e
+                raise LLMProxyError(f"流式中断：{_friendly_error(e)}") from e
             # 连接阶段失败：记录失败用量后重试下一个 key（与非流式 chat 一致）
             _record_failed(key.id, model, 0, 0, latency_ms, str(e), provider)
             continue
 
     if last_error:
-        raise LLMProxyError(f"all retries failed; last error: {last_error}") from last_error
-    raise LLMProxyError("stream failed for unknown reason")
+        raise LLMProxyError(_friendly_error(last_error)) from last_error
+    raise LLMProxyError("流式调用失败，原因未知")
 
 
 def _extract_stream_usage(cfg, chunk_json: dict) -> tuple[int, int] | None:

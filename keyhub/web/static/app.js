@@ -3,14 +3,21 @@
 // ============================================================
 
 // ===== API 封装（带 401 自动跳转、错误归一化）=====
+// 标记是否正在处理 401 跳转，避免重复跳转与循环
+let _handling401 = false;
+
 async function api(path, opts = {}) {
   const res = await fetch(path, {
     headers: { 'Content-Type': 'application/json', ...(opts.headers || {}) },
     ...opts,
   });
   if (res.status === 401) {
-    // session 过期 → 跳回解锁页
-    location.href = '/';
+    // session 过期 → 跳回解锁页（首页路由会渲染解锁页）
+    if (!_handling401) {
+      _handling401 = true;
+      toast('会话已过期，请重新解锁', 'info', 2000);
+      setTimeout(() => { location.href = '/'; }, 800);
+    }
     throw new Error('会话已过期，请重新解锁');
   }
   if (!res.ok) {
@@ -97,6 +104,11 @@ window.unlockSubmit = async function () {
 // ===== 控制台主入口 =====
 window.addEventListener('DOMContentLoaded', () => {
   if (!el('panel')) return;
+  // LLM 输入框聚焦时全选，避免外部注入值时拼接
+  ['l-provider', 'l-model'].forEach(id => {
+    const inp = el(id);
+    if (inp) inp.addEventListener('focus', () => inp.select());
+  });
   loadCreds();
   loadLLM();
   loadStats();
@@ -261,10 +273,14 @@ window.llmChat = async function () {
   const out = el('llm-out');
   const stream = el('l-stream')?.checked;
   const body = {
-    provider: el('l-provider').value,
-    model: el('l-model').value,
+    provider: el('l-provider').value.trim(),
+    model: el('l-model').value.trim(),
     messages: [{ role: 'user', content: el('l-input').value }],
   };
+  if (!body.provider || !body.model) {
+    err('llm-err', '供应商和模型不能为空');
+    return;
+  }
   if (stream) body.stream = true;
 
   el('llm-send-btn').disabled = true;
