@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ title }}</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="center-wrap">
+    <div class="card center-card">
+      <h1>解锁 KeyHub</h1>
+      <p class="muted">输入主密码以解锁凭证库。</p>
+      <div style="margin-top:16px">
+        <label>主密码</label>
+        <input id="pw" type="password" autocomplete="current-password" onkeydown="if(event.key==='Enter')unlockSubmit()">
+      </div>
+      <div id="err" class="error"></div>
+      <button style="margin-top:16px;width:100%" onclick="unlockSubmit()">解锁</button>
+    </div>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

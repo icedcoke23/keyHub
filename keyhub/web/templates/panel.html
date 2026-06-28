@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ title }}</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="container" id="panel">
+  <div class="nav">
+    <div class="logo">🔑 KeyHub</div>
+    <button class="small secondary" onclick="logout()">锁定退出</button>
+  </div>
+
+  <div class="stats" style="margin-bottom:16px">
+    <div class="stat"><div class="num" id="stat-creds">-</div><div class="lbl">凭证总数</div></div>
+    <div class="stat"><div class="num" id="stat-llm">-</div><div class="lbl">LLM Key 数</div></div>
+    <div class="stat"><div class="num" id="stat-active">-</div><div class="lbl">活跃 Key</div></div>
+    <div class="stat"><div class="num" id="stat-cost">-</div><div class="lbl">累计成本</div></div>
+  </div>
+
+  <div class="card">
+    <div class="tabs">
+      <div class="tab active" id="t-creds" onclick="switchTab('creds')">凭证</div>
+      <div class="tab" id="t-llm" onclick="switchTab('llm')">LLM 代理</div>
+      <div class="tab" id="t-usage" onclick="switchTab('usage')">用量</div>
+      <div class="tab" id="t-rotation" onclick="switchTab('rotation')">轮换提醒</div>
+    </div>
+
+    <!-- 凭证 -->
+    <div id="tab-creds">
+      <h2>新增凭证</h2>
+      <div class="row">
+        <div><label>名称</label><input id="c-name" placeholder="openai-main"></div>
+        <div><label>类型</label>
+          <select id="c-type">
+            <option value="password">password</option>
+            <option value="token">token</option>
+            <option value="ssh_key">ssh_key</option>
+            <option value="database">database</option>
+            <option value="llm">llm</option>
+            <option value="other">other</option>
+          </select>
+        </div>
+        <div><label>轮换周期(天)</label><input id="c-rot" type="number" placeholder="90"></div>
+      </div>
+      <div style="margin-top:12px"><label>明文值</label><input id="c-value" type="password" placeholder="sk-..."></div>
+      <div class="row" style="margin-top:12px">
+        <div><label>LLM 供应商（type=llm 时）</label><input id="c-provider" placeholder="openai"></div>
+        <div><label>LLM 标签</label><input id="c-label" placeholder="main"></div>
+        <div class="nogrow"><button onclick="createCred()">添加</button></div>
+      </div>
+      <div id="c-err" class="error"></div>
+
+      <h2 style="margin-top:24px">凭证列表</h2>
+      <table>
+        <thead><tr><th>名称</th><th>类型</th><th>供应商/标签</th><th>状态</th><th>到期</th><th>操作</th></tr></thead>
+        <tbody id="cred-tbody"></tbody>
+      </table>
+    </div>
+
+    <!-- LLM -->
+    <div id="tab-llm" class="hidden">
+      <h2>LLM Key 状态</h2>
+      <div id="llm-cost" class="stats" style="margin-bottom:16px"></div>
+      <table>
+        <thead><tr><th>供应商</th><th>标签</th><th>状态</th><th>请求数</th><th>成本</th><th>操作</th></tr></thead>
+        <tbody id="llm-keys"></tbody>
+      </table>
+
+      <h2 style="margin-top:24px">代理调用测试</h2>
+      <div class="row">
+        <div><label>供应商</label><input id="l-provider" value="openai"></div>
+        <div><label>模型</label><input id="l-model" value="gpt-4o-mini"></div>
+      </div>
+      <div style="margin-top:12px"><label>消息</label><textarea id="l-input" rows="3" placeholder="说点什么...">Hello</textarea></div>
+      <button style="margin-top:12px" onclick="llmChat()">调用</button>
+      <div id="llm-err" class="error"></div>
+      <div style="margin-top:12px"><label>响应</label><pre class="secret-box" id="llm-out" style="white-space:pre-wrap;min-height:60px"></pre></div>
+    </div>
+
+    <!-- 用量 -->
+    <div id="tab-usage" class="hidden">
+      <h2>最近调用</h2>
+      <table>
+        <thead><tr><th>时间</th><th>Key</th><th>模型</th><th>token(in/out)</th><th>成本</th><th>延迟</th><th>结果</th></tr></thead>
+        <tbody id="usage-tbody"></tbody>
+      </table>
+    </div>
+
+    <!-- 轮换 -->
+    <div id="tab-rotation" class="hidden">
+      <h2>轮换提醒</h2>
+      <table>
+        <thead><tr><th>名称</th><th>类型</th><th>距到期</th><th>上次轮换</th><th>状态</th></tr></thead>
+        <tbody id="rot-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- 明文展示弹层 -->
+<div id="secret-modal" class="center-wrap hidden" style="position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:100">
+  <div class="card center-card">
+    <h2 id="secret-name"></h2>
+    <label>明文（仅本次展示）</label>
+    <div class="secret-box" id="secret-box"></div>
+    <button style="margin-top:16px;width:100%" onclick="closeSecret()">关闭</button>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
