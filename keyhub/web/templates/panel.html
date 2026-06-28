@@ -4,31 +4,57 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{{ title }}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
+<div class="scan-line"></div>
 <div class="container" id="panel">
-  <div class="nav">
-    <div class="logo">🔑 KeyHub</div>
-    <button class="small secondary" onclick="logout()">锁定退出</button>
+
+  <!-- 导航 -->
+  <div class="nav fade-in-up">
+    <div class="logo">
+      <span class="key-icon">🔑</span>
+      <span>KeyHub</span>
+      <span class="brand-sub">SECURE VAULT</span>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center">
+      <span class="tag ok" id="status-badge"><span id="status-text">已解锁</span></span>
+      <button class="small ghost" onclick="logout()">锁定退出</button>
+    </div>
   </div>
 
-  <div class="stats" style="margin-bottom:16px">
-    <div class="stat"><div class="num" id="stat-creds">-</div><div class="lbl">凭证总数</div></div>
-    <div class="stat"><div class="num" id="stat-llm">-</div><div class="lbl">LLM Key 数</div></div>
-    <div class="stat"><div class="num" id="stat-active">-</div><div class="lbl">活跃 Key</div></div>
-    <div class="stat"><div class="num" id="stat-cost">-</div><div class="lbl">累计成本</div></div>
+  <!-- 统计卡片 -->
+  <div class="stats stagger" style="margin-bottom:18px">
+    <div class="stat">
+      <div class="num" id="stat-creds">-</div>
+      <div class="lbl">凭证总数</div>
+    </div>
+    <div class="stat">
+      <div class="num" id="stat-llm">-</div>
+      <div class="lbl">LLM Keys</div>
+    </div>
+    <div class="stat">
+      <div class="num accent" id="stat-active">-</div>
+      <div class="lbl">活跃 Key</div>
+    </div>
+    <div class="stat">
+      <div class="num" id="stat-cost">-</div>
+      <div class="lbl">累计成本 ($)</div>
+    </div>
   </div>
 
-  <div class="card">
+  <div class="card card-corner fade-in-up">
     <div class="tabs">
       <div class="tab active" id="t-creds" onclick="switchTab('creds')">凭证</div>
       <div class="tab" id="t-llm" onclick="switchTab('llm')">LLM 代理</div>
       <div class="tab" id="t-usage" onclick="switchTab('usage')">用量</div>
-      <div class="tab" id="t-rotation" onclick="switchTab('rotation')">轮换提醒</div>
+      <div class="tab" id="t-rotation" onclick="switchTab('rotation')">轮换</div>
+      <div class="tab" id="t-audit" onclick="switchTab('audit')">审计</div>
+      <div class="tab" id="t-security" onclick="switchTab('security')">安全</div>
     </div>
 
-    <!-- 凭证 -->
+    <!-- ===== 凭证 ===== -->
     <div id="tab-creds">
       <h2>新增凭证</h2>
       <div class="row">
@@ -47,20 +73,20 @@
       </div>
       <div style="margin-top:12px"><label>明文值</label><input id="c-value" type="password" placeholder="sk-..."></div>
       <div class="row" style="margin-top:12px">
-        <div><label>LLM 供应商（type=llm 时）</label><input id="c-provider" placeholder="openai"></div>
+        <div><label>LLM 供应商（type=llm）</label><input id="c-provider" placeholder="openai"></div>
         <div><label>LLM 标签</label><input id="c-label" placeholder="main"></div>
-        <div class="nogrow"><button onclick="createCred()">添加</button></div>
+        <div class="nogrow"><button onclick="createCred()">添加凭证</button></div>
       </div>
       <div id="c-err" class="error"></div>
 
-      <h2 style="margin-top:24px">凭证列表</h2>
+      <h2 style="margin-top:28px">凭证列表</h2>
       <table>
         <thead><tr><th>名称</th><th>类型</th><th>供应商/标签</th><th>状态</th><th>到期</th><th>操作</th></tr></thead>
         <tbody id="cred-tbody"></tbody>
       </table>
     </div>
 
-    <!-- LLM -->
+    <!-- ===== LLM 代理 ===== -->
     <div id="tab-llm" class="hidden">
       <h2>LLM Key 状态</h2>
       <div id="llm-cost" class="stats" style="margin-bottom:16px"></div>
@@ -69,18 +95,29 @@
         <tbody id="llm-keys"></tbody>
       </table>
 
-      <h2 style="margin-top:24px">代理调用测试</h2>
+      <h2 style="margin-top:28px">代理调用测试</h2>
       <div class="row">
         <div><label>供应商</label><input id="l-provider" value="openai"></div>
         <div><label>模型</label><input id="l-model" value="gpt-4o-mini"></div>
+        <div class="nogrow" style="padding-bottom:0">
+          <label style="visibility:hidden">流式</label>
+          <label style="display:flex;gap:6px;align-items:center;text-transform:none;letter-spacing:0;font-size:13px;color:var(--text-2);cursor:pointer">
+            <input type="checkbox" id="l-stream" style="width:auto"><span>流式</span>
+          </label>
+        </div>
       </div>
       <div style="margin-top:12px"><label>消息</label><textarea id="l-input" rows="3" placeholder="说点什么...">Hello</textarea></div>
-      <button style="margin-top:12px" onclick="llmChat()">调用</button>
+      <div style="margin-top:12px;display:flex;gap:8px">
+        <button id="llm-send-btn" onclick="llmChat()">调用</button>
+        <button class="ghost" id="llm-stop-btn" onclick="stopChat()" disabled>停止</button>
+      </div>
       <div id="llm-err" class="error"></div>
-      <div style="margin-top:12px"><label>响应</label><pre class="secret-box" id="llm-out" style="white-space:pre-wrap;min-height:60px"></pre></div>
+      <div style="margin-top:12px"><label>响应</label>
+        <div class="chat-stream" id="llm-out"></div>
+      </div>
     </div>
 
-    <!-- 用量 -->
+    <!-- ===== 用量 ===== -->
     <div id="tab-usage" class="hidden">
       <h2>最近调用</h2>
       <table>
@@ -89,7 +126,7 @@
       </table>
     </div>
 
-    <!-- 轮换 -->
+    <!-- ===== 轮换 ===== -->
     <div id="tab-rotation" class="hidden">
       <h2>轮换提醒</h2>
       <table>
@@ -97,18 +134,95 @@
         <tbody id="rot-tbody"></tbody>
       </table>
     </div>
+
+    <!-- ===== 审计（新增）===== -->
+    <div id="tab-audit" class="hidden">
+      <h2>审计日志</h2>
+      <div class="row" style="margin-bottom:14px">
+        <div><label>动作过滤</label>
+          <select id="a-action" onchange="loadAudit()">
+            <option value="">全部</option>
+            <option value="credential.create">凭证创建</option>
+            <option value="credential.reveal">凭证查看</option>
+            <option value="credential.rotate">凭证轮换</option>
+            <option value="credential.delete">凭证删除</option>
+            <option value="auth.unlock">解锁</option>
+            <option value="auth.unlock_failed">解锁失败</option>
+            <option value="auth.password_change">改密</option>
+            <option value="token.create">Token 创建</option>
+            <option value="token.revoke">Token 吊销</option>
+            <option value="llm.proxy_call">LLM 调用</option>
+          </select>
+        </div>
+        <div class="nogrow" style="padding-bottom:0">
+          <label style="visibility:hidden">刷新</label>
+          <button class="ghost" onclick="loadAudit()">刷新</button>
+        </div>
+      </div>
+      <div id="audit-list" style="border:1px solid var(--border-soft);border-radius:var(--radius-sm);overflow:hidden"></div>
+    </div>
+
+    <!-- ===== 安全（新增）===== -->
+    <div id="tab-security" class="hidden">
+      <h2>修改主密码</h2>
+      <p class="muted" style="margin-bottom:14px">变更后将重新加密所有凭证。操作不可撤销，请确保新密码妥善保管。</p>
+      <div style="max-width:420px">
+        <div><label>旧主密码</label><input id="s-old" type="password" autocomplete="current-password"></div>
+        <div style="margin-top:12px"><label>新主密码（至少 8 位）</label><input id="s-new" type="password" autocomplete="new-password"></div>
+        <div style="margin-top:12px"><label>确认新密码</label><input id="s-new2" type="password" autocomplete="new-password"></div>
+        <div id="s-err" class="error"></div>
+        <button style="margin-top:14px;width:100%" onclick="changePassword()">确认变更</button>
+      </div>
+
+      <h2 style="margin-top:32px">API Token 管理</h2>
+      <div class="row" style="margin-bottom:14px">
+        <div><label>Token 名称</label><input id="t-name" placeholder="ci-deploy"></div>
+        <div><label>Scope（逗号分隔）</label><input id="t-scopes" value="credentials:read" placeholder="credentials:read,llm:chat"></div>
+        <div class="nogrow"><button onclick="createToken()">创建</button></div>
+      </div>
+      <table>
+        <thead><tr><th>名称</th><th>Scopes</th><th>创建时间</th><th>上次使用</th><th>状态</th><th>操作</th></tr></thead>
+        <tbody id="token-tbody"></tbody>
+      </table>
+
+      <h2 style="margin-top:32px">通知测试</h2>
+      <p class="muted" style="margin-bottom:14px">发送一条测试通知到已配置的 Webhook / 邮箱 / 控制台。</p>
+      <button class="secondary" onclick="testNotify()">发送测试通知</button>
+    </div>
   </div>
 </div>
 
 <!-- 明文展示弹层 -->
-<div id="secret-modal" class="center-wrap hidden" style="position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:100">
-  <div class="card center-card">
+<div id="secret-modal" class="modal-backdrop hidden">
+  <div class="card modal-card">
     <h2 id="secret-name"></h2>
-    <label>明文（仅本次展示）</label>
+    <label>明文（仅本次展示，关闭后不可恢复）</label>
     <div class="secret-box" id="secret-box"></div>
-    <button style="margin-top:16px;width:100%" onclick="closeSecret()">关闭</button>
+    <div style="margin-top:14px;display:flex;gap:8px">
+      <button class="secondary" style="flex:1" onclick="copySecret()">复制</button>
+      <button class="danger" style="flex:1" onclick="closeSecret()">关闭</button>
+    </div>
   </div>
 </div>
+
+<!-- Token 创建结果弹层 -->
+<div id="token-modal" class="modal-backdrop hidden">
+  <div class="card modal-card">
+    <h2>Token 已创建</h2>
+    <div class="warning-box" style="background:var(--warn-soft);border:1px solid rgba(255,179,71,0.3);border-radius:var(--radius-sm);padding:12px 14px;font-size:12px;color:var(--warn);font-family:var(--font-mono);line-height:1.6;margin-bottom:14px">
+      ⚠ 此 Token 仅显示一次，关闭后无法再次查看。请立即复制保存。
+    </div>
+    <label>Token 明文</label>
+    <div class="secret-box" id="token-plain" style="word-break:break-all"></div>
+    <div style="margin-top:14px;display:flex;gap:8px">
+      <button class="secondary" style="flex:1" onclick="copyToken()">复制</button>
+      <button style="flex:1" onclick="closeTokenModal()">我已保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast 容器 -->
+<div class="toast-container" id="toast-container"></div>
 
 <script src="/static/app.js"></script>
 </body>

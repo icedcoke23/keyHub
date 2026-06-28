@@ -4,21 +4,26 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{{ title }}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-  <div class="center-wrap">
-    <div class="card center-card">
-      <h1>解锁 KeyHub</h1>
-      <p class="muted">输入主密码以解锁凭证库。</p>
-      <div style="margin-top:16px">
-        <label>主密码</label>
-        <input id="pw" type="password" autocomplete="current-password" onkeydown="if(event.key==='Enter')unlockSubmit()">
-      </div>
+<div class="scan-line"></div>
+<div class="center-wrap">
+  <div class="card center-card auth-page fade-in-up" style="text-align:center">
+    <div class="vault-icon">🔓</div>
+    <h1>解锁 KeyHub</h1>
+    <div class="tagline">// AUTHENTICATE TO ACCESS VAULT</div>
+    <div style="text-align:left;margin-top:20px">
+      <label>主密码</label>
+      <input id="pw" type="password" autocomplete="current-password" placeholder="••••••••••••" onkeydown="if(event.key==='Enter')unlockSubmit()">
       <div id="err" class="error"></div>
-      <button style="margin-top:16px;width:100%" onclick="unlockSubmit()">解锁</button>
+      <button style="margin-top:18px;width:100%" onclick="unlockSubmit()" id="submit-btn">
+        <span id="btn-text">解锁</span>
+      </button>
     </div>
   </div>
-  <script src="/static/app.js"></script>
+</div>
+<script src="/static/app.js"></script>
 </body>
 </html>
