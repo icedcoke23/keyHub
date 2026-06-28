@@ -14,10 +14,12 @@ from ..auth import (
     create_token,
     hash_token,
     require_auth,
+    require_scope,
 )
 from ..config import get_settings
 from ..db import session_scope
 from ..models import APIToken, AuditAction
+from ..ratelimit import get_limiter
 from ..runtime import get_runtime
 from ..schemas import (
     ChangePasswordRequest,
@@ -55,15 +57,32 @@ def init(body: LoginRequest, request: Request):
 
 @router.post("/unlock", response_model=MessageOut)
 def unlock(body: LoginRequest, response: Response, request: Request):
-    """解锁并建立 session。"""
+    """解锁并建立 session。
+
+    含基于 IP 的失败限流：连续失败达阈值后锁定该 IP（指数退避）。
+    """
     rt = get_runtime()
     if not rt.is_initialized():
         raise HTTPException(400, "not initialized")
-    if not rt.unlock(body.password):
-        # 解锁失败必须审计
+    ip = _client_ip(request)
+    # 限流检查
+    limiter = get_limiter()
+    locked, remaining = limiter.is_locked(ip)
+    if locked:
         audit_record(AuditAction.auth_unlock_failed, "anonymous",
-                     success=False, detail={"ip": _client_ip(request)})
+                     success=False, detail={"ip": ip, "reason": "rate_limited",
+                                            "retry_after": remaining})
+        raise HTTPException(429, f"too many failed attempts; retry after {remaining}s")
+    if not rt.unlock(body.password):
+        # 解锁失败必须审计 + 计入限流
+        audit_record(AuditAction.auth_unlock_failed, "anonymous",
+                     success=False, detail={"ip": ip})
+        triggered, lock_secs = limiter.record_failure(ip)
+        if triggered:
+            raise HTTPException(429, f"too many failed attempts; locked for {lock_secs}s")
         raise HTTPException(401, "invalid master password")
+    # 成功：重置限流计数
+    limiter.record_success(ip)
     response.set_cookie(
         key=SESSION_COOKIE,
         value=create_session("master"),
@@ -73,19 +92,19 @@ def unlock(body: LoginRequest, response: Response, request: Request):
         max_age=7 * 24 * 3600,
     )
     audit_record(AuditAction.auth_unlock, "master",
-                 detail={"ip": _client_ip(request)})
+                 detail={"ip": ip})
     return MessageOut(message="unlocked")
 
 
 @router.post("/lock", response_model=MessageOut)
-def lock(actor: str = Depends(require_auth)):
+def lock(actor: str = Depends(require_scope("admin:write"))):
     get_runtime().lock()
     audit_record(AuditAction.auth_lock, actor)
     return MessageOut(message="locked")
 
 
 @router.post("/change-password", response_model=MessageOut)
-def change_password(body: ChangePasswordRequest, actor: str = Depends(require_auth)):
+def change_password(body: ChangePasswordRequest, actor: str = Depends(require_scope("admin:write"))):
     """变更主密码（重新加密所有凭证）。
 
     要求当前已解锁。变更成功后旧 session 仍有效（vault 已热替换）。
@@ -112,7 +131,7 @@ def logout(response: Response):
 # ===== API Token =====
 
 @router.post("/tokens", response_model=TokenCreated)
-def create_api_token(body: TokenCreate, actor: str = Depends(require_auth)):
+def create_api_token(body: TokenCreate, actor: str = Depends(require_scope("admin:write"))):
     settings = get_settings()
     expires_in = body.expires_in_hours if body.expires_in_hours else settings.token_expire_hours
     raw, record = create_token(body.name, body.scopes, expires_in)
@@ -131,7 +150,7 @@ def create_api_token(body: TokenCreate, actor: str = Depends(require_auth)):
 
 
 @router.get("/tokens", response_model=list[TokenOut])
-def list_tokens(_: str = Depends(require_auth)):
+def list_tokens(_: str = Depends(require_scope("admin:read"))):
     with session_scope() as s:
         rows = s.execute(select(APIToken).order_by(APIToken.created_at.desc())).scalars().all()
         return [
@@ -149,7 +168,7 @@ def list_tokens(_: str = Depends(require_auth)):
 
 
 @router.delete("/tokens/{token_id}", response_model=MessageOut)
-def revoke_token(token_id: str, actor: str = Depends(require_auth)):
+def revoke_token(token_id: str, actor: str = Depends(require_scope("admin:write"))):
     with session_scope() as s:
         r = s.get(APIToken, token_id)
         if r is None:

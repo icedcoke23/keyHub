@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from .config import get_settings
 
 
-# SQLite 启用外键约束与 WAL
+# SQLite 启用外键约束、WAL 与 busy_timeout
 @event.listens_for(Engine, "connect")
 def _set_sqlite_pragma(dbapi_conn, _record):  # pragma: no cover
     import sqlite3
@@ -22,6 +22,9 @@ def _set_sqlite_pragma(dbapi_conn, _record):  # pragma: no cover
         cur.execute("PRAGMA journal_mode=WAL;")
         cur.execute("PRAGMA foreign_keys=ON;")
         cur.execute("PRAGMA synchronous=NORMAL;")
+        # busy_timeout：并发写入时等待最多 5s 而非立即报 SQLITE_BUSY，
+        # 避免 rotation-checker / notifier / 请求线程并发写时 "database is locked"
+        cur.execute("PRAGMA busy_timeout=5000;")
         cur.close()
 
 
@@ -37,6 +40,10 @@ def get_engine() -> Engine:
             settings.db_url,
             connect_args={"check_same_thread": False},
             future=True,
+            # SQLite 单写者模型下，连接池不宜过大；pre_ping 探活避免 stale 连接
+            pool_size=5,
+            max_overflow=0,
+            pool_pre_ping=True,
         )
     return _engine
 

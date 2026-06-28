@@ -80,6 +80,7 @@ async function loadCreds() {
     const list = await api('/api/credentials');
     const tbody = el('cred-tbody');
     if (!list.length) { tbody.innerHTML = '<tr><td colspan="6" class="muted">暂无凭证</td></tr>'; return; }
+    // 使用 data-* 属性承载动态值，避免内联 onclick 的 XSS 风险
     tbody.innerHTML = list.map(c => `
       <tr>
         <td>${esc(c.name)}</td>
@@ -88,11 +89,21 @@ async function loadCreds() {
         <td>${c.llm_status ? `<span class="tag ${c.llm_status === 'active' ? 'ok' : 'warn'}">${esc(c.llm_status)}</span>` : '<span class="muted">-</span>'}</td>
         <td>${c.expires_at ? esc(c.expires_at.slice(0, 10)) : '<span class="muted">-</span>'}</td>
         <td>
-          <button class="small secondary" onclick="reveal('${esc(c.name)}')">查看</button>
-          <button class="small secondary" onclick="rotate('${esc(c.name)}')">轮换</button>
-          <button class="small danger" onclick="del('${esc(c.name)}')">删</button>
+          <button class="small secondary" data-action="reveal" data-name="${esc(c.name)}">查看</button>
+          <button class="small secondary" data-action="rotate" data-name="${esc(c.name)}">轮换</button>
+          <button class="small danger" data-action="del" data-name="${esc(c.name)}">删</button>
         </td>
       </tr>`).join('');
+    // 事件委托：避免内联 onclick 拼接 JS 字符串导致的 XSS
+    tbody.querySelectorAll('button[data-action]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const action = btn.dataset.action;
+        const name = btn.dataset.name;
+        if (action === 'reveal') reveal(name);
+        else if (action === 'rotate') rotate(name);
+        else if (action === 'del') del(name);
+      });
+    });
   } catch (e) { console.error(e); }
 }
 window.loadCreds = loadCreds;
@@ -159,10 +170,14 @@ async function loadLLM() {
         <td>${k.total_requests}</td>
         <td>${k.estimated_cost_usd.toFixed(4)}</td>
         <td>
-          <button class="small secondary" onclick="setKeyStatus('${k.id}','active')">启用</button>
-          <button class="small secondary" onclick="setKeyStatus('${k.id}','disabled')">停用</button>
+          <button class="small secondary" data-action="key-active" data-id="${esc(k.id)}">启用</button>
+          <button class="small secondary" data-action="key-disabled" data-id="${esc(k.id)}">停用</button>
         </td>
       </tr>`).join('') : '<tr><td colspan="6" class="muted">暂无 LLM key</td></tr>';
+    // 事件委托替代内联 onclick
+    el('llm-keys').querySelectorAll('button[data-action]').forEach(btn => {
+      btn.addEventListener('click', () => setKeyStatus(btn.dataset.id, btn.dataset.action === 'key-active' ? 'active' : 'disabled'));
+    });
     let costHtml = '';
     for (const [p, v] of Object.entries(cost)) {
       costHtml += `<div class="stat"><div class="num">$${v.cost_usd.toFixed(4)}</div><div class="lbl">${esc(p)} · ${v.calls} 次调用</div></div>`;

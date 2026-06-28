@@ -84,13 +84,35 @@ def _unlocked_or_401():
         )
 
 
+def _scope_matches(required: str, granted: list[str]) -> bool:
+    """校验 required scope 是否被 granted 列表覆盖。
+
+    规则：
+    - granted 含 "*" → 通配所有权限
+    - granted 含 "admin:*" 或 "<prefix>:*" → 覆盖该前缀下所有 scope
+    - 精确匹配 required
+    """
+    for g in granted:
+        if g == "*":
+            return True
+        if g == required:
+            return True
+        if g.endswith(":*") and required.startswith(g[:-1]):
+            return True
+    return False
+
+
 def require_auth(
     request: Request,
     creds: Annotated[Optional[HTTPAuthorizationCredentials], Depends(_bearer)],
+    required_scope: str | None = None,
 ) -> str:
     """认证依赖：优先 API Token，其次 Session Cookie。
 
     返回认证主体标识（'master' 或 token id）。
+
+    Session 认证（浏览器登录）默认拥有全部权限。
+    API Token 认证需校验 required_scope（若提供）。
     """
     rt = get_runtime()
     if not rt.is_initialized():
@@ -110,9 +132,16 @@ def require_auth(
             if row.expires_at and row.expires_at < datetime.utcnow():
                 raise HTTPException(status_code=401, detail="token expired")
             row.last_used_at = datetime.utcnow()
+            token_scopes = list(row.scopes or [])
+        # scope 校验
+        if required_scope and not _scope_matches(required_scope, token_scopes):
+            raise HTTPException(
+                status_code=403,
+                detail=f"token lacks required scope: {required_scope}",
+            )
         return f"token:{row.id}"
 
-    # 2) Session cookie
+    # 2) Session cookie（浏览器登录，拥有全部权限）
     cookie = request.cookies.get(SESSION_COOKIE)
     if cookie and verify_session(cookie):
         return "master"
@@ -122,3 +151,17 @@ def require_auth(
         detail="not authenticated",
         headers={"WWW-Authenticate": "Bearer"},
     )
+
+
+def require_scope(scope: str):
+    """工厂依赖：生成要求指定 scope 的认证依赖。
+
+    用法：actor: str = Depends(require_scope("credentials:reveal"))
+    Session 认证总是通过；API Token 必须具备该 scope（或通配）。
+    """
+    def _dep(
+        request: Request,
+        creds: Annotated[Optional[HTTPAuthorizationCredentials], Depends(_bearer)],
+    ) -> str:
+        return require_auth(request, creds, required_scope=scope)
+    return _dep
