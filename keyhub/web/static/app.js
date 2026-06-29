@@ -572,8 +572,9 @@ window.loadCreds = async function() {
         <td>${c.expires_at ? esc(c.expires_at.slice(0,10)) : '-'}</td>
         <td>${(c.tags || []).map(t => `<span class="tag">${esc(t)}</span>`).join(' ') || '-'}</td>
         <td>
-          <button class="small ghost" onclick="revealCred('${esc(c.name)}')">查看</button>
-          <button class="small ghost" onclick="deleteCred('${esc(c.name)}')">删除</button>
+          <button class="small secondary" onclick="reveal('${esc(c.name)}')">查看</button>
+          <button class="small secondary" onclick="rotate('${esc(c.name)}')">轮换</button>
+          <button class="small danger" onclick="del('${esc(c.name)}')">删</button>
         </td>
       </tr>
     `).join('');

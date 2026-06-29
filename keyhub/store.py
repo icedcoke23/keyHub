@@ -138,6 +138,7 @@ def get_credential(name: str) -> CredentialOut:
     with session_scope() as s:
         c = s.execute(
             select(Credential).where(Credential.name == name)
+            .where(Credential.deleted == False)  # noqa: E712
         ).scalar_one_or_none()
         if c is None:
             raise KeyError(name)
@@ -150,6 +151,7 @@ def reveal_credential(name: str, actor: str = "system") -> CredentialSecret:
     with session_scope() as s:
         c = s.execute(
             select(Credential).where(Credential.name == name)
+            .where(Credential.deleted == False)  # noqa: E712
         ).scalar_one_or_none()
         if c is None:
             raise KeyError(name)

@@ -203,6 +203,12 @@ def chat(
         try:
             key = balancer.pick(provider, model)
         except NoAvailableKeyError:
+            # 无可用 key 也算一次失败，记录指标
+            try:
+                from ..metrics import llm_requests_total
+                llm_requests_total.labels(provider=provider, model=model, status="fail").inc()
+            except Exception:
+                pass
             if last_error:
                 raise LLMProxyError(_friendly_error(last_error)) from last_error
             raise LLMProxyError(f"没有可用的 key（provider={provider}, model={model}），请在控制台添加") from None
@@ -382,6 +388,12 @@ def chat_stream(
         try:
             key = balancer.pick(provider, model)
         except NoAvailableKeyError:
+            # 无可用 key 也算一次失败，记录指标
+            try:
+                from ..metrics import llm_requests_total
+                llm_requests_total.labels(provider=provider, model=model, status="fail").inc()
+            except Exception:
+                pass
             if last_error:
                 raise LLMProxyError(_friendly_error(last_error)) from last_error
             raise LLMProxyError(f"没有可用的 key（provider={provider}, model={model}），请在控制台添加") from None

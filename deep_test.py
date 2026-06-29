@@ -229,7 +229,16 @@ def test_llm_proxy_enhancements():
     check("延迟统计端点", r.status_code == 200)
 
     # 2.8 负载均衡策略切换
+    # 注意：2.3 的失败调用可能已将 openai key 标记为 error/冷却，
+    # 此处先重置 key 状态以确保策略测试有可用 key
     from keyhub.config import get_settings
+    from keyhub.db import session_scope as _ss
+    from keyhub.models import LLMKey, LLMKeyStatus
+    from sqlalchemy import update as _upd
+    with _ss() as s:
+        s.execute(_upd(LLMKey).where(LLMKey.provider == "openai").values(
+            status=LLMKeyStatus.active, cooldown_until=None
+        ))
     settings = get_settings()
     original_strategy = settings.llm_balance_strategy
     for strategy in ["round_robin", "latency", "cost", "weighted"]:
@@ -258,6 +267,8 @@ def test_llm_proxy_enhancements():
             bal.mark_ok(keys[0].id, 500)
             bal.mark_ok(keys[0].id, 700)
             s.commit()
+            # expire_on_commit=False，需手动 expire 以读到 mark_ok 在另一 session 的更新
+            s.expire_all()
             updated = s.get(LLMKey, keys[0].id)
             check("avg_latency_ms EMA 更新", updated.avg_latency_ms > 0,
                   f"latency={updated.avg_latency_ms}")
