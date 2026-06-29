@@ -166,6 +166,25 @@ def chat(
     if not cfg.base_url:
         raise LLMProxyError(f"provider '{provider}' has no base_url configured")
 
+    settings = get_settings()
+    # 响应缓存检查
+    from .cache import get_cache
+    cache = get_cache()
+    cached = cache.get(provider, model, messages, temperature, settings.llm_cache_ttl)
+    if cached is not None:
+        try:
+            from ..metrics import llm_cache_hits
+            llm_cache_hits.inc()
+        except Exception:
+            pass
+        return cached
+    # 缓存未命中
+    try:
+        from ..metrics import llm_cache_misses
+        llm_cache_misses.inc()
+    except Exception:
+        pass
+
     body: dict[str, Any] = {
         "model": model,
         "messages": messages,
@@ -178,7 +197,6 @@ def chat(
         body.update(extra)
 
     balancer = get_balancer()
-    settings = get_settings()
     last_error: Exception | None = None
 
     for attempt in range(max_retries):
@@ -188,6 +206,11 @@ def chat(
             if last_error:
                 raise LLMProxyError(_friendly_error(last_error)) from last_error
             raise LLMProxyError(f"没有可用的 key（provider={provider}, model={model}），请在控制台添加") from None
+
+        # 预算检查：累计成本超过月度预算则停用该 key 并重试下一个
+        if key.monthly_budget_usd > 0 and key.estimated_cost_usd >= key.monthly_budget_usd:
+            _check_budget_exceeded(key.id, key.estimated_cost_usd, key.monthly_budget_usd, provider)
+            continue
 
         # 取明文 key：需要关联的 credential.encrypted_value
         from ..models import Credential, LLMKey
@@ -219,7 +242,13 @@ def chat(
         request_sent = False
 
         try:
-            with httpx.Client(timeout=settings.llm_timeout) as client:
+            timeout = httpx.Timeout(
+                connect=settings.llm_connect_timeout,
+                read=settings.llm_read_timeout,
+                write=settings.llm_connect_timeout,
+                pool=settings.llm_connect_timeout,
+            )
+            with httpx.Client(timeout=timeout) as client:
                 r = client.post(url, headers=headers, json=req_body)
             request_sent = True
             latency_ms = int((time.monotonic() - t0) * 1000)
@@ -235,12 +264,22 @@ def chat(
                     pass
                 _record_failed(key.id, model, prompt_tokens, completion_tokens,
                                latency_ms, err_msg, provider)
+                try:
+                    from ..metrics import llm_requests_total
+                    llm_requests_total.labels(provider=provider, model=model, status="fail").inc()
+                except Exception:
+                    pass
                 continue
             if r.status_code >= 400:
                 balancer.mark_error(key.id)
                 err_msg = f"upstream {r.status_code}: {r.text[:200]}"
                 last_error = LLMProxyError(err_msg)
                 _record_failed(key.id, model, 0, 0, latency_ms, err_msg, provider)
+                try:
+                    from ..metrics import llm_requests_total
+                    llm_requests_total.labels(provider=provider, model=model, status="fail").inc()
+                except Exception:
+                    pass
                 continue
 
             resp_json = r.json()
@@ -253,6 +292,11 @@ def chat(
             last_error = e
             if request_sent:
                 _record_failed(key.id, model, 0, 0, latency_ms, err_msg, provider)
+                try:
+                    from ..metrics import llm_requests_total
+                    llm_requests_total.labels(provider=provider, model=model, status="fail").inc()
+                except Exception:
+                    pass
             continue
 
         # 成功：记录用量并返回
@@ -267,7 +311,25 @@ def chat(
             success=success,
             error=None,
         )
-        balancer.mark_ok(key.id)
+        balancer.mark_ok(key.id, latency_ms)
+        # 指标更新
+        try:
+            from ..metrics import llm_request_duration, llm_cost_total, llm_tokens_total, llm_requests_total
+            llm_requests_total.labels(provider=provider, model=model, status="ok").inc()
+            llm_request_duration.labels(provider=provider, model=model).observe(latency_ms / 1000)
+            llm_cost_total.labels(provider=provider, model=model).inc(cost)
+            llm_tokens_total.labels(provider=provider, model=model, kind="prompt").inc(prompt_tokens)
+            llm_tokens_total.labels(provider=provider, model=model, kind="completion").inc(completion_tokens)
+        except Exception:
+            pass
+        # 延迟记录
+        try:
+            from .latency_stats import get_latency_stats
+            get_latency_stats().record(provider, latency_ms)
+        except Exception:
+            pass
+        # 写入缓存
+        cache.set(provider, model, messages, temperature, resp_json)
         return resp_json
 
     # 全部重试失败
@@ -343,7 +405,13 @@ def chat_stream(
         prompt_tokens = completion_tokens = 0
         upstream_started = False
         try:
-            with httpx.Client(timeout=settings.llm_timeout) as client:
+            timeout = httpx.Timeout(
+                connect=settings.llm_connect_timeout,
+                read=settings.llm_read_timeout,
+                write=settings.llm_connect_timeout,
+                pool=settings.llm_connect_timeout,
+            )
+            with httpx.Client(timeout=timeout) as client:
                 with client.stream("POST", url, headers=headers, json=req_body) as r:
                     if r.status_code == 429:
                         balancer.mark_rate_limited(key.id)
@@ -426,3 +494,25 @@ def _extract_stream_usage(cfg, chunk_json: dict) -> tuple[int, int] | None:
             return int(u.get("input_tokens", 0)), 0
         return None
     return None
+
+
+def _check_budget_exceeded(key_id, cost, budget, provider):
+    """预算超限：停用 key + 审计 + 通知。"""
+    from sqlalchemy import update
+    from ..models import LLMKey, LLMKeyStatus, AuditAction
+    from ..audit import record as audit_record
+    from ..notify import get_notifier
+    from ..db import session_scope
+    with session_scope() as s:
+        s.execute(update(LLMKey).where(LLMKey.id == key_id).values(
+            status=LLMKeyStatus.exhausted, cooldown_until=None
+        ))
+    audit_record(AuditAction.llm_budget_exceeded, "system",
+                 target=f"key:{key_id}",
+                 detail={"cost": cost, "budget": budget, "provider": provider})
+    try:
+        get_notifier().notify("llm.budget_exceeded", {
+            "key_id": key_id, "provider": provider, "cost": cost, "budget": budget
+        })
+    except Exception:
+        pass

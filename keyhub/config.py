@@ -42,8 +42,22 @@ class Settings(BaseSettings):
     # API Token 有效期（小时）
     token_expire_hours: int = 720
 
-    # LLM 代理超时
+    # LLM 代理超时（兼容字段，优先使用下面的精细超时）
     llm_timeout: int = 120
+    # LLM 精细超时（秒）
+    llm_connect_timeout: int = 10
+    llm_read_timeout: int = 120
+    # 响应缓存 TTL（秒），0 = 禁用
+    llm_cache_ttl: int = 300
+    # 负载均衡策略：round_robin / latency / cost / weighted
+    llm_balance_strategy: str = "round_robin"
+
+    # 空闲自动锁定（秒），0 = 禁用
+    auto_lock_idle_seconds: int = 1800
+    # API Token 速率限制（每分钟请求数，0 = 禁用）
+    token_rpm_limit: int = 60
+    # 审计日志保留天数（0 = 禁用自动清理）
+    audit_retention_days: int = 0
 
     # 后台轮换检查间隔（秒）
     rotation_check_interval: int = 3600

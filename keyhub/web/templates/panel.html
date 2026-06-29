@@ -20,6 +20,7 @@
     </div>
     <div style="display:flex;gap:8px;align-items:center">
       <span class="tag ok" id="status-badge"><span id="status-text">已解锁</span></span>
+      <button class="theme-toggle" onclick="toggleTheme()" title="切换主题">🌙</button>
       <button class="small ghost" onclick="logout()">锁定退出</button>
     </div>
   </div>
@@ -71,17 +72,25 @@
         </div>
         <div><label>轮换周期(天)</label><input id="c-rot" type="number" placeholder="90"></div>
       </div>
-      <div style="margin-top:12px"><label>明文值</label><input id="c-value" type="password" placeholder="sk-..."></div>
+      <div class="row" style="margin-top:12px">
+        <div style="flex:1"><label>明文值</label><input id="c-value" type="password" placeholder="sk-..."></div>
+        <div class="nogrow"><button class="secondary small" onclick="genPassword()">生成</button></div>
+      </div>
       <div class="row" style="margin-top:12px">
         <div><label>LLM 供应商（type=llm）</label><input id="c-provider" placeholder="openai"></div>
         <div><label>LLM 标签</label><input id="c-label" placeholder="main"></div>
+        <div><label>标签（逗号分隔）</label><input id="c-tags" placeholder="prod, critical"></div>
         <div class="nogrow"><button onclick="createCred()">添加凭证</button></div>
       </div>
       <div id="c-err" class="error"></div>
 
       <h2 style="margin-top:28px">凭证列表</h2>
+      <div class="row" style="margin-bottom:14px">
+        <div><input id="c-search" placeholder="搜索凭证名..." oninput="loadCreds()"></div>
+        <div><input id="c-tag-filter" placeholder="标签过滤..." oninput="loadCreds()"></div>
+      </div>
       <table>
-        <thead><tr><th>名称</th><th>类型</th><th>供应商/标签</th><th>状态</th><th>到期</th><th>操作</th></tr></thead>
+        <thead><tr><th>名称</th><th>类型</th><th>供应商/标签</th><th>状态</th><th>到期</th><th>标签</th><th>操作</th></tr></thead>
         <tbody id="cred-tbody"></tbody>
       </table>
     </div>
@@ -119,6 +128,8 @@
 
     <!-- ===== 用量 ===== -->
     <div id="tab-usage" class="hidden">
+      <h2>成本趋势</h2>
+      <div id="cost-trend-chart" class="chart-container"></div>
       <h2>最近调用</h2>
       <table>
         <thead><tr><th>时间</th><th>Key</th><th>模型</th><th>token(in/out)</th><th>成本</th><th>延迟</th><th>结果</th></tr></thead>

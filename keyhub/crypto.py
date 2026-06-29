@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import os
+import time
 import ctypes
 from dataclasses import dataclass
 from typing import Optional
@@ -184,3 +185,154 @@ def secure_zero_string(s: str) -> None:
     # CPython 中字符串内部 buffer 无法安全清零，
     # 这里仅作为占位提醒：敏感字符串应尽快离开作用域。
     del s
+
+
+# ===== 密码生成器 =====
+
+def generate_password(
+    length: int = 20,
+    upper: bool = True,
+    lower: bool = True,
+    digits: bool = True,
+    symbols: bool = True,
+    exclude_similar: bool = False,
+) -> str:
+    """生成密码学安全的随机密码。使用 secrets 模块。"""
+    import secrets as _s
+    import string as _st
+    chars = ""
+    similar = set("0O1lI|`oO")
+    if upper:
+        chars += _st.ascii_uppercase
+    if lower:
+        chars += _st.ascii_lowercase
+    if digits:
+        chars += _st.digits
+    if symbols:
+        chars += "!@#$%^&*()-_=+[]{};:,.<>?"
+    if exclude_similar:
+        chars = "".join(c for c in chars if c not in similar)
+    if not chars:
+        chars = _st.ascii_letters + _st.digits
+    return "".join(_s.choice(chars) for _ in range(max(length, 4)))
+
+
+def password_strength(password: str) -> dict:
+    """评估密码强度。返回 {score: 0-4, label: str, entropy_bits: float, issues: list[str]}。"""
+    import math
+    if not password:
+        return {"score": 0, "label": "极弱", "entropy_bits": 0, "issues": ["空密码"]}
+    issues = []
+    charset_size = 0
+    has_lower = any(c.islower() for c in password)
+    has_upper = any(c.isupper() for c in password)
+    has_digit = any(c.isdigit() for c in password)
+    has_symbol = any(not c.isalnum() for c in password)
+    if has_lower:
+        charset_size += 26
+    if has_upper:
+        charset_size += 26
+    if has_digit:
+        charset_size += 10
+    if has_symbol:
+        charset_size += 32
+    if charset_size == 0:
+        charset_size = 1
+    entropy = len(password) * math.log2(charset_size)
+    if len(password) < 8:
+        issues.append("长度过短（建议至少 8 位）")
+    if not has_lower:
+        issues.append("缺少小写字母")
+    if not has_upper:
+        issues.append("缺少大写字母")
+    if not has_digit:
+        issues.append("缺少数字")
+    if not has_symbol:
+        issues.append("缺少特殊符号")
+    # 常见弱密码模式
+    common = ["123456", "password", "qwerty", "abc123", "111111", "000000"]
+    if password.lower() in common:
+        issues.append("常见弱密码")
+        entropy = min(entropy, 10)
+    if password.isdigit():
+        issues.append("纯数字密码")
+        entropy = min(entropy, len(password) * math.log2(10))
+    # 评分
+    if entropy < 28:
+        score, label = 0, "极弱"
+    elif entropy < 36:
+        score, label = 1, "弱"
+    elif entropy < 60:
+        score, label = 2, "中等"
+    elif entropy < 80:
+        score, label = 3, "强"
+    else:
+        score, label = 4, "很强"
+    if len(password) < 8:
+        score = min(score, 1)
+    return {"score": score, "label": label, "entropy_bits": round(entropy, 2), "issues": issues}
+
+
+# ===== TOTP (RFC 6238) =====
+
+_TOTP_STEP = 30
+_TOTP_DIGITS = 6
+
+def _b32_decode(secret: str) -> bytes:
+    """base32 解码，自动补齐 padding。"""
+    import base64 as _b64
+    s = secret.upper().replace(" ", "").rstrip("=")
+    pad = (8 - len(s) % 8) % 8
+    s = s + "=" * pad
+    return _b64.b32decode(s)
+
+def _hotp(secret_bytes: bytes, counter: int) -> str:
+    """HOTP 算法（RFC 4226）。"""
+    import hmac as _hmac
+    import hashlib as _hl
+    import struct
+    msg = struct.pack(">Q", counter)
+    digest = _hmac.new(secret_bytes, msg, _hl.sha1).digest()
+    offset = digest[-1] & 0x0F
+    code_int = (
+        (digest[offset] & 0x7F) << 24
+        | (digest[offset + 1] & 0xFF) << 16
+        | (digest[offset + 2] & 0xFF) << 8
+        | (digest[offset + 3] & 0xFF)
+    )
+    code = code_int % (10 ** _TOTP_DIGITS)
+    return str(code).zfill(_TOTP_DIGITS)
+
+def generate_totp_secret() -> str:
+    """生成 32 字节 base32 编码的 TOTP 密钥。"""
+    import base64 as _b64
+    return _b64.b32encode(os.urandom(32)).decode("ascii")
+
+def generate_totp_uri(secret: str, account: str, issuer: str = "KeyHub") -> str:
+    """生成 otpauth:// URI。"""
+    from urllib.parse import quote
+    label = quote(f"{issuer}:{account}", safe=":")
+    return (
+        f"otpauth://totp/{label}"
+        f"?secret={secret}"
+        f"&issuer={quote(issuer, safe='')}"
+        f"&algorithm=SHA1"
+        f"&digits={_TOTP_DIGITS}"
+        f"&period={_TOTP_STEP}"
+    )
+
+def verify_totp(secret: str, code: str, window: int = 1) -> bool:
+    """验证 TOTP 码。window=1 允许前后各 30 秒偏差。使用恒定时间比较。"""
+    import hmac as _hmac
+    if not code or not code.isdigit() or len(code) != _TOTP_DIGITS:
+        return False
+    try:
+        secret_bytes = _b32_decode(secret)
+    except Exception:
+        return False
+    counter = int(time.time()) // _TOTP_STEP
+    for offset in range(-window, window + 1):
+        candidate = _hotp(secret_bytes, counter + offset)
+        if _hmac.compare_digest(candidate, code):
+            return True
+    return False

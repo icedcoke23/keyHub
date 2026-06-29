@@ -510,3 +510,118 @@ window.testNotify = async function () {
     toast(r.message || '通知已发送', 'success');
   } catch (e) { toast(e.message, 'error'); }
 };
+
+// ===== 主题切换 =====
+function toggleTheme() {
+  const cur = document.documentElement.getAttribute('data-theme') || 'dark';
+  const next = cur === 'dark' ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', next);
+  localStorage.setItem('keyhub-theme', next);
+  const btn = document.querySelector('.theme-toggle');
+  if (btn) btn.textContent = next === 'dark' ? '🌙' : '☀️';
+}
+// 初始化主题
+(function() {
+  const saved = localStorage.getItem('keyhub-theme') || 'dark';
+  document.documentElement.setAttribute('data-theme', saved);
+  setTimeout(() => {
+    const btn = document.querySelector('.theme-toggle');
+    if (btn) btn.textContent = saved === 'dark' ? '🌙' : '☀️';
+  }, 100);
+})();
+
+// ===== 密码生成器 =====
+async function genPassword() {
+  try {
+    const data = await api('/api/credentials/utils/generate-password?length=20&symbols=true');
+    const inp = el('c-value');
+    if (inp) {
+      inp.value = data.password;
+      inp.type = 'text';
+      toast(`已生成密码（强度: ${data.strength.label}）`, 'success');
+    }
+  } catch (e) { toast('生成失败: ' + e.message, 'error'); }
+}
+window.genPassword = genPassword;
+
+// ===== 凭证搜索与标签过滤 =====
+// 修改 loadCreds 函数支持搜索
+const _origLoadCreds = window.loadCreds;
+window.loadCreds = async function() {
+  const search = el('c-search')?.value || '';
+  const tagFilter = el('c-tag-filter')?.value || '';
+  let url = '/api/credentials';
+  const params = [];
+  if (search) params.push('q=' + encodeURIComponent(search));
+  if (tagFilter) params.push('tag=' + encodeURIComponent(tagFilter));
+  if (params.length) url += '?' + params.join('&');
+  try {
+    const creds = await api(url);
+    const tbody = el('cred-tbody');
+    if (!tbody) return;
+    if (!creds.length) {
+      tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--muted)">暂无凭证</td></tr>';
+      return;
+    }
+    tbody.innerHTML = creds.map(c => `
+      <tr>
+        <td>${esc(c.name)}</td>
+        <td>${esc(c.type)}</td>
+        <td>${c.provider ? esc(c.provider) + '/' + esc(c.label || '') : '-'}</td>
+        <td>${c.llm_status ? `<span class="tag ${c.llm_status === 'active' ? 'ok' : 'warn'}">${esc(c.llm_status)}</span>` : '-'}</td>
+        <td>${c.expires_at ? esc(c.expires_at.slice(0,10)) : '-'}</td>
+        <td>${(c.tags || []).map(t => `<span class="tag">${esc(t)}</span>`).join(' ') || '-'}</td>
+        <td>
+          <button class="small ghost" onclick="revealCred('${esc(c.name)}')">查看</button>
+          <button class="small ghost" onclick="deleteCred('${esc(c.name)}')">删除</button>
+        </td>
+      </tr>
+    `).join('');
+  } catch (e) { toast('加载失败: ' + e.message, 'error'); }
+};
+
+// ===== 成本趋势图 =====
+async function loadCostTrend() {
+  try {
+    const data = await api('/api/llm/cost/trend?days=7');
+    const container = el('cost-trend-chart');
+    if (!container) return;
+    if (!data.length) {
+      container.innerHTML = '<div style="margin:auto;color:var(--muted)">暂无数据</div>';
+      return;
+    }
+    const maxCost = Math.max(...data.map(d => d.cost), 0.01);
+    container.innerHTML = data.map(d => {
+      const h = Math.max((d.cost / maxCost) * 100, 2);
+      return `<div class="chart-bar" style="height:${h}%" data-label="${d.date.slice(5)}" data-value="$${d.cost.toFixed(4)}"></div>`;
+    }).join('');
+  } catch (e) { console.error('cost trend:', e); }
+}
+window.loadCostTrend = loadCostTrend;
+
+// ===== 快捷键 =====
+document.addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') {
+    if (e.key === 'Escape') e.target.blur();
+    return;
+  }
+  if (e.key === '/') {
+    e.preventDefault();
+    const s = el('c-search');
+    if (s) s.focus();
+  } else if (e.key === 'Escape') {
+    const modal = document.querySelector('.modal:not(.hidden)');
+    if (modal) modal.classList.add('hidden');
+  } else if (e.key >= '1' && e.key <= '6') {
+    const tabs = ['creds', 'llm', 'usage', 'rotation', 'audit', 'security'];
+    const idx = parseInt(e.key) - 1;
+    if (tabs[idx] && typeof switchTab === 'function') switchTab(tabs[idx]);
+  }
+});
+
+// 切换到用量 tab 时加载趋势图
+const _origSwitchTab = window.switchTab;
+window.switchTab = function(tab) {
+  if (_origSwitchTab) _origSwitchTab(tab);
+  if (tab === 'usage') setTimeout(loadCostTrend, 100);
+};

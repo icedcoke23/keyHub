@@ -24,6 +24,7 @@ dependencies = [
     "rich>=13.7",
     "python-jose[cryptography]>=3.3",
     "itsdangerous>=2.1",
+    "prometheus-client>=0.20",
 ]
 
 [project.optional-dependencies]

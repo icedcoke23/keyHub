@@ -139,11 +139,32 @@ def require_auth(
                 status_code=403,
                 detail=f"token lacks required scope: {required_scope}",
             )
+        # 速率限制检查
+        from .ratelimit import get_token_limiter
+        from .models import AuditAction
+        from .audit import record as audit_record
+        allowed, remaining = get_token_limiter().check(row.id)
+        if not allowed:
+            audit_record(
+                AuditAction.token_rate_limited,
+                f"token:{row.id}",
+                success=False,
+                detail={"reason": "rpm exceeded"},
+            )
+            raise HTTPException(
+                status_code=429,
+                detail="token rate limit exceeded",
+                headers={"Retry-After": "60"},
+            )
+        from .auto_lock import get_auto_lock_checker
+        get_auto_lock_checker().touch()
         return f"token:{row.id}"
 
     # 2) Session cookie（浏览器登录，拥有全部权限）
     cookie = request.cookies.get(SESSION_COOKIE)
     if cookie and verify_session(cookie):
+        from .auto_lock import get_auto_lock_checker
+        get_auto_lock_checker().touch()
         return "master"
 
     raise HTTPException(

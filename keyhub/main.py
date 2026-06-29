@@ -19,6 +19,9 @@ from .rotation import get_checker
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # 配置结构化日志
+    from .structured_logging import setup_logging
+    setup_logging("INFO")
     # 启动
     init_db()
     from .notify import get_notifier
@@ -41,9 +44,24 @@ async def lifespan(app: FastAPI):
 
     checker = get_checker()
     checker.start(on_remind=_on_remind)
+
+    # 启动空闲自动锁定
+    from .auto_lock import get_auto_lock_checker
+    auto_lock = get_auto_lock_checker()
+    auto_lock.start()
+
+    # 清理过期审计日志
+    settings = get_settings()
+    if settings.audit_retention_days > 0:
+        from .audit import cleanup_old_logs
+        deleted = cleanup_old_logs(settings.audit_retention_days)
+        if deleted:
+            print(f"[audit] cleaned up {deleted} old log entries", flush=True)
+
     yield
     # 关闭
     checker.stop()
+    auto_lock.stop()
 
 
 def create_app() -> FastAPI:
@@ -62,6 +80,12 @@ def create_app() -> FastAPI:
     app.include_router(llm_api.router)
     app.include_router(rot_api.router)
     app.include_router(audit_api.router)
+    # OpenAI 兼容 API
+    from .api import v1 as v1_api
+    app.include_router(v1_api.router)
+    # Prometheus 指标
+    from .metrics import router as metrics_router
+    app.include_router(metrics_router)
 
     # Web UI
     if settings.web_ui:

@@ -77,7 +77,38 @@ def session_scope() -> Iterator[Session]:
 
 
 def init_db() -> None:
-    """创建所有表。"""
+    """创建所有表，并对已有表执行轻量级自动迁移（ALTER TABLE ADD COLUMN）。"""
     from .models import Base  # noqa: F401  ensure models imported
 
     Base.metadata.create_all(get_engine())
+    _auto_migrate()
+
+
+def _auto_migrate() -> None:
+    """检查并补充新增列，确保旧数据库平滑升级。"""
+    from sqlalchemy import inspect, text
+
+    engine = get_engine()
+    insp = inspect(engine)
+
+    migrations: dict[str, list[tuple[str, str]]] = {
+        "credentials": [
+            ("tags", "JSON"),
+        ],
+        "llm_keys": [
+            ("weight", "INTEGER DEFAULT 1"),
+            ("monthly_budget_usd", "FLOAT DEFAULT 0.0"),
+            ("avg_latency_ms", "INTEGER DEFAULT 0"),
+        ],
+    }
+
+    with engine.begin() as conn:
+        for table, cols in migrations.items():
+            if not insp.has_table(table):
+                continue
+            existing = {c["name"] for c in insp.get_columns(table)}
+            for col_name, col_def in cols:
+                if col_name not in existing:
+                    conn.execute(
+                        text(f'ALTER TABLE "{table}" ADD COLUMN "{col_name}" {col_def}')
+                    )

@@ -6,7 +6,7 @@ import hashlib
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from .audit import record as audit_record
 from .db import session_scope
@@ -50,6 +50,7 @@ def _to_out(c: Credential) -> CredentialOut:
         created_at=c.created_at,
         updated_at=c.updated_at,
         last_rotated_at=c.last_rotated_at,
+        tags=c.tags or [],
     )
     if c.llm_key:
         out.provider = c.llm_key.provider
@@ -57,6 +58,8 @@ def _to_out(c: Credential) -> CredentialOut:
         out.llm_status = c.llm_key.status
         out.total_requests = c.llm_key.total_requests
         out.estimated_cost_usd = c.llm_key.estimated_cost_usd
+        out.monthly_budget_usd = c.llm_key.monthly_budget_usd
+        out.avg_latency_ms = c.llm_key.avg_latency_ms
     return out
 
 
@@ -77,6 +80,7 @@ def create_credential(data: CredentialCreate, actor: str = "system") -> Credenti
             metadata_=data.metadata,
             expires_at=data.expires_at,
             rotation_days=data.rotation_days,
+            tags=data.tags or [],
         )
         s.add(cred)
 
@@ -90,6 +94,8 @@ def create_credential(data: CredentialCreate, actor: str = "system") -> Credenti
                 label=label,
                 allowed_models=data.allowed_models,
                 priority=data.priority,
+                weight=data.weight,
+                monthly_budget_usd=data.monthly_budget_usd,
                 status=LLMKeyStatus.active,
             )
             s.add(llm)
@@ -107,6 +113,8 @@ def create_credential(data: CredentialCreate, actor: str = "system") -> Credenti
 def list_credentials(
     type_filter: CredentialType | None = None,
     include_deleted: bool = False,
+    q: str | None = None,
+    tag: str | None = None,
 ) -> list[CredentialOut]:
     with session_scope() as s:
         stmt = select(Credential)
@@ -114,6 +122,11 @@ def list_credentials(
             stmt = stmt.where(Credential.deleted == False)  # noqa: E712
         if type_filter:
             stmt = stmt.where(Credential.type == type_filter)
+        if q:
+            stmt = stmt.where(Credential.name.contains(q))
+        if tag:
+            # SQLite JSON 数组用 LIKE 简单匹配
+            stmt = stmt.where(text("tags LIKE '%' || :tag || '%'").bindparams(tag=tag))
         stmt = stmt.order_by(Credential.name)
         rows = s.execute(stmt).scalars().all()
         return [_to_out(c) for c in rows]
@@ -147,6 +160,7 @@ def reveal_credential(name: str, actor: str = "system") -> CredentialSecret:
             type=c.type,
             value=value,
             metadata=c.metadata_ or {},
+            tags=c.tags or [],
         )
     # reveal 是最敏感的操作，必须审计；记录目标与类型，不记录明文
     audit_record(AuditAction.credential_reveal, actor, target=name,
@@ -182,6 +196,8 @@ def update_credential(name: str, data: CredentialUpdate, actor: str = "system") 
             c.expires_at = data.expires_at
         if data.rotation_days is not None:
             c.rotation_days = data.rotation_days
+        if data.tags is not None:
+            c.tags = data.tags
 
         if rotated:
             s.add(RotationLog(

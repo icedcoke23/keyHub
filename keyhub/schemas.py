@@ -19,11 +19,14 @@ class CredentialCreate(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     expires_at: datetime | None = None
     rotation_days: int | None = None
+    tags: list[str] = Field(default_factory=list)
     # LLM 扩展
     provider: str | None = None
     label: str | None = None
     allowed_models: list[str] = Field(default_factory=list)
     priority: int = 0
+    weight: int = 1
+    monthly_budget_usd: float = 0.0
 
 
 class CredentialUpdate(BaseModel):
@@ -32,6 +35,7 @@ class CredentialUpdate(BaseModel):
     expires_at: datetime | None = None
     rotation_days: int | None = None
     rotation_note: str | None = None
+    tags: list[str] | None = None
 
 
 class CredentialOut(BaseModel):
@@ -44,12 +48,15 @@ class CredentialOut(BaseModel):
     created_at: datetime
     updated_at: datetime
     last_rotated_at: datetime | None
+    tags: list[str] = Field(default_factory=list)
     # LLM 扩展（若存在）
     provider: str | None = None
     label: str | None = None
     llm_status: LLMKeyStatus | None = None
     total_requests: int | None = None
     estimated_cost_usd: float | None = None
+    monthly_budget_usd: float | None = None
+    avg_latency_ms: int | None = None
 
 
 class CredentialSecret(BaseModel):
@@ -60,6 +67,7 @@ class CredentialSecret(BaseModel):
     type: CredentialType
     value: str
     metadata: dict[str, Any]
+    tags: list[str] = Field(default_factory=list)
 
 
 # ===== LLM 用量 =====
@@ -87,10 +95,13 @@ class LLMKeySummary(BaseModel):
     label: str
     status: LLMKeyStatus
     priority: int
+    weight: int = 1
     total_requests: int
     total_prompt_tokens: int
     total_completion_tokens: int
     estimated_cost_usd: float
+    monthly_budget_usd: float = 0.0
+    avg_latency_ms: int = 0
     cooldown_until: datetime | None
     last_rotated_at: datetime | None
 

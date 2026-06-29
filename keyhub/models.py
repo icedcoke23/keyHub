@@ -93,6 +93,9 @@ class Credential(Base):
     # 软删除
     deleted: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
 
+    # 标签（用于分类与过滤）
+    tags: Mapped[list] = mapped_column(JSON, default=list)
+
     # LLM 扩展（仅 type==llm 时使用）
     llm_key: Mapped["LLMKey | None"] = relationship(
         back_populates="credential",
@@ -142,6 +145,12 @@ class LLMKey(Base):
 
     # 优先级：数值越大越优先；同优先级轮询
     priority: Mapped[int] = mapped_column(Integer, default=0)
+    # 权重（用于 weighted 负载均衡策略）
+    weight: Mapped[int] = mapped_column(Integer, default=1)
+    # 月度预算（美元），超过后自动停用；0 = 不限
+    monthly_budget_usd: Mapped[float] = mapped_column(Float, default=0.0)
+    # 平均延迟（毫秒，EMA），用于 latency 路由策略
+    avg_latency_ms: Mapped[int] = mapped_column(Integer, default=0)
 
     # 用量汇总（增量更新）
     total_requests: Mapped[int] = mapped_column(Integer, default=0)
@@ -237,10 +246,16 @@ class AuditAction(str, enum.Enum):
     # Token
     token_create = "token.create"
     token_revoke = "token.revoke"
+    token_rate_limited = "token.rate_limited"
+    # 凭证扩展
+    credential_import = "credential.import"
     # 系统
     backup_export = "backup.export"
     backup_import = "backup.import"
     llm_proxy_call = "llm.proxy_call"
+    llm_budget_exceeded = "llm.budget_exceeded"
+    llm_cache_hit = "llm.cache_hit"
+    auth_auto_lock = "auth.auto_lock"
 
 
 class AuditLog(Base):
