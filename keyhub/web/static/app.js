@@ -104,14 +104,10 @@ window.unlockSubmit = async function () {
 // ===== 控制台主入口 =====
 window.addEventListener('DOMContentLoaded', () => {
   if (!el('panel')) return;
-  // LLM 输入框聚焦时全选，避免外部注入值时拼接
-  ['l-provider', 'l-model'].forEach(id => {
-    const inp = el(id);
-    if (inp) inp.addEventListener('focus', () => inp.select());
-  });
   loadCreds();
   loadLLM();
   loadStats();
+  initChatInput();
   // 审计/Token 懒加载（切 tab 时再加载）
 });
 
@@ -120,6 +116,9 @@ function switchTab(name) {
     show('tab-' + n, n === name);
     el('t-' + n)?.classList.toggle('active', n === name);
   });
+  if (name !== 'audit') {
+    disconnectAuditSSE();
+  }
   if (name === 'rotation') loadReminders();
   if (name === 'usage') loadUsage();
   if (name === 'llm') loadLLM();
@@ -231,6 +230,8 @@ window.logout = async function () {
 
 // ===== LLM =====
 let chatAbortController = null;
+let chatHistory = [];
+let isGenerating = false;
 
 async function loadLLM() {
   if (!el('llm-keys')) return;
@@ -257,8 +258,45 @@ async function loadLLM() {
     }
     el('llm-cost').innerHTML = costHtml || '<div class="muted">暂无用量</div>';
   } catch (e) { console.error(e); }
+  loadChatModels();
 }
 window.loadLLM = loadLLM;
+
+async function loadChatModels() {
+  const sel = el('chat-model');
+  if (!sel) return;
+  try {
+    const data = await api('/v1/models');
+    const models = data.data || [];
+    if (!models.length) {
+      sel.innerHTML = '<option value="">无可用模型</option>';
+      return;
+    }
+    const grouped = {};
+    models.forEach(m => {
+      const provider = m.owned_by || 'other';
+      if (!grouped[provider]) grouped[provider] = [];
+      grouped[provider].push(m);
+    });
+    let html = '';
+    for (const [provider, ms] of Object.entries(grouped)) {
+      html += `<optgroup label="${esc(provider)}">`;
+      ms.forEach(m => {
+        html += `<option value="${esc(m.id)}">${esc(m.id)}</option>`;
+      });
+      html += '</optgroup>';
+    }
+    sel.innerHTML = html;
+    const preferred = ['gpt-4o-mini', 'gpt-3.5-turbo', 'claude-3-haiku', 'deepseek-chat'];
+    for (const p of preferred) {
+      const opt = Array.from(sel.options).find(o => o.value === p);
+      if (opt) { sel.value = p; break; }
+    }
+  } catch (e) {
+    sel.innerHTML = '<option value="">加载失败</option>';
+    console.error('load models:', e);
+  }
+}
 
 window.setKeyStatus = async function (id, status) {
   try {
@@ -268,49 +306,280 @@ window.setKeyStatus = async function (id, status) {
   } catch (e) { toast(e.message, 'error'); }
 };
 
-window.llmChat = async function () {
-  err('llm-err', '');
-  const out = el('llm-out');
-  const stream = el('l-stream')?.checked;
-  const body = {
-    provider: el('l-provider').value.trim(),
-    model: el('l-model').value.trim(),
-    messages: [{ role: 'user', content: el('l-input').value }],
-  };
-  if (!body.provider || !body.model) {
-    err('llm-err', '供应商和模型不能为空');
+// ===== Markdown 渲染（纯 JS 实现）=====
+function renderMarkdown(text) {
+  let html = esc(text);
+
+  html = html.replace(/```([\s\S]*?)```/g, (match, code) => {
+    return `<pre class="md-code-block"><code>${code.trim()}</code></pre>`;
+  });
+
+  html = html.replace(/`([^`]+)`/g, '<code class="md-code">$1</code>');
+
+  html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  html = html.replace(/__([^_]+)__/g, '<strong>$1</strong>');
+
+  html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+  html = html.replace(/_([^_]+)_/g, '<em>$1</em>');
+
+  const lines = html.split('\n');
+  const result = [];
+  let inList = false;
+  let listType = null;
+
+  for (let i = 0; i < lines.length; i++) {
+    let line = lines[i];
+
+    const ulMatch = line.match(/^\s*[-*+]\s+(.*)/);
+    const olMatch = line.match(/^\s*\d+\.\s+(.*)/);
+
+    if (ulMatch) {
+      if (!inList || listType !== 'ul') {
+        if (inList) result.push(listType === 'ul' ? '</ul>' : '</ol>');
+        result.push('<ul class="md-list">');
+        inList = true;
+        listType = 'ul';
+      }
+      result.push(`<li>${ulMatch[1]}</li>`);
+    } else if (olMatch) {
+      if (!inList || listType !== 'ol') {
+        if (inList) result.push(listType === 'ul' ? '</ul>' : '</ol>');
+        result.push('<ol class="md-list">');
+        inList = true;
+        listType = 'ol';
+      }
+      result.push(`<li>${olMatch[1]}</li>`);
+    } else {
+      if (inList) {
+        result.push(listType === 'ul' ? '</ul>' : '</ol>');
+        inList = false;
+        listType = null;
+      }
+      if (line.trim()) {
+        result.push(`<p>${line}</p>`);
+      }
+    }
+  }
+  if (inList) {
+    result.push(listType === 'ul' ? '</ul>' : '</ol>');
+  }
+
+  return result.join('\n');
+}
+
+// ===== Playground 聊天界面 =====
+function scrollChatToBottom() {
+  const container = el('chat-messages');
+  if (container) {
+    container.scrollTop = container.scrollHeight;
+  }
+}
+
+function addMessage(role, content, streaming = false) {
+  const container = el('chat-messages');
+  if (!container) return;
+
+  const welcome = container.querySelector('.chat-welcome');
+  if (welcome) welcome.remove();
+
+  const msgDiv = document.createElement('div');
+  msgDiv.className = `chat-message ${role}`;
+  msgDiv.dataset.role = role;
+
+  const avatar = document.createElement('div');
+  avatar.className = 'chat-avatar';
+  avatar.textContent = role === 'user' ? '👤' : '🤖';
+
+  const bubble = document.createElement('div');
+  bubble.className = 'chat-bubble';
+  if (streaming) {
+    bubble.classList.add('streaming');
+    bubble.innerHTML = '<span class="chat-cursor"></span>';
+  } else {
+    bubble.innerHTML = renderMarkdown(content);
+  }
+
+  msgDiv.appendChild(avatar);
+  msgDiv.appendChild(bubble);
+  container.appendChild(msgDiv);
+  scrollChatToBottom();
+  return bubble;
+}
+
+function updateStreamingMessage(bubble, content) {
+  if (!bubble) return;
+  bubble.innerHTML = renderMarkdown(content) + '<span class="chat-cursor"></span>';
+  scrollChatToBottom();
+}
+
+function finishStreamingMessage(bubble, content) {
+  if (!bubble) return;
+  bubble.classList.remove('streaming');
+  bubble.innerHTML = renderMarkdown(content);
+  scrollChatToBottom();
+}
+
+function showChatError(msg) {
+  const errEl = el('chat-err');
+  if (errEl) {
+    errEl.textContent = msg;
+    errEl.style.display = 'block';
+    setTimeout(() => { errEl.style.display = 'none'; }, 5000);
+  }
+}
+
+function setGeneratingState(generating) {
+  isGenerating = generating;
+  const sendBtn = el('chat-send-btn');
+  const stopBtn = el('chat-stop-btn');
+  const input = el('chat-input');
+  if (sendBtn) sendBtn.disabled = generating;
+  if (stopBtn) stopBtn.disabled = !generating;
+  if (input) input.disabled = generating;
+}
+
+window.clearChat = function() {
+  chatHistory = [];
+  const container = el('chat-messages');
+  if (container) {
+    container.innerHTML = `
+      <div class="chat-welcome">
+        <div class="chat-welcome-icon">💬</div>
+        <div class="chat-welcome-text">选择模型，开始对话</div>
+      </div>`;
+  }
+};
+
+window.stopChatPlayground = function() {
+  if (chatAbortController) {
+    chatAbortController.abort();
+  }
+};
+
+window.sendChatMessage = async function() {
+  if (isGenerating) return;
+  const input = el('chat-input');
+  const modelSel = el('chat-model');
+  if (!input || !modelSel) return;
+
+  const content = input.value.trim();
+  const model = modelSel.value;
+  if (!content) return;
+  if (!model) {
+    showChatError('请先选择模型');
     return;
   }
-  if (stream) body.stream = true;
 
-  el('llm-send-btn').disabled = true;
-  el('llm-stop-btn').disabled = false;
-  out.classList.add('streaming');
-  out.textContent = '';
+  chatHistory.push({ role: 'user', content: content });
+  addMessage('user', content);
+  input.value = '';
+  input.style.height = 'auto';
+
+  setGeneratingState(true);
+  const assistantBubble = addMessage('assistant', '', true);
+  let assistantContent = '';
 
   try {
-    if (stream) {
-      await streamChat(body, out);
+    chatAbortController = new AbortController();
+    const res = await fetch('/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: model,
+        messages: chatHistory,
+        stream: true,
+      }),
+      signal: chatAbortController.signal,
+    });
+
+    if (!res.ok) {
+      let msg = res.statusText;
+      try {
+        const errJson = await res.json();
+        msg = errJson.error?.message || errJson.detail || msg;
+      } catch {}
+      throw new Error(msg);
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const data = line.slice(6).trim();
+        if (data === '[DONE]') continue;
+        if (!data) continue;
+
+        try {
+          const obj = JSON.parse(data);
+          if (obj.error) {
+            const errMsg = typeof obj.error === 'string' ? obj.error : (obj.error.message || '流式响应错误');
+            throw new Error(errMsg);
+          }
+          const delta = obj.choices?.[0]?.delta?.content;
+          if (delta) {
+            assistantContent += delta;
+            updateStreamingMessage(assistantBubble, assistantContent);
+          }
+        } catch (e) {
+          if (e instanceof SyntaxError) continue;
+          throw e;
+        }
+      }
+    }
+
+    if (assistantContent) {
+      chatHistory.push({ role: 'assistant', content: assistantContent });
+      finishStreamingMessage(assistantBubble, assistantContent);
     } else {
-      const r = await postJSON('/api/llm/chat', body);
-      const text = r.choices ? r.choices[0]?.message?.content
-        : (r.content ? r.content[0]?.text : JSON.stringify(r, null, 2));
-      out.textContent = text || '(空响应)';
+      finishStreamingMessage(assistantBubble, '(空响应)');
     }
     loadLLM(); loadUsage(); loadStats();
   } catch (e) {
     if (e.name === 'AbortError') {
-      out.textContent += '\n\n[已停止]';
+      finishStreamingMessage(assistantBubble, assistantContent + '\n\n[已停止]');
+      if (assistantContent) {
+        chatHistory.push({ role: 'assistant', content: assistantContent });
+      }
     } else {
-      err('llm-err', e.message);
+      showChatError(e.message);
+      if (assistantBubble) assistantBubble.remove();
     }
   } finally {
-    out.classList.remove('streaming');
-    el('llm-send-btn').disabled = false;
-    el('llm-stop-btn').disabled = true;
+    setGeneratingState(false);
     chatAbortController = null;
+    input.focus();
   }
 };
+
+function initChatInput() {
+  const input = el('chat-input');
+  if (!input) return;
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendChatMessage();
+    }
+  });
+
+  input.addEventListener('input', () => {
+    input.style.height = 'auto';
+    input.style.height = Math.min(input.scrollHeight, 200) + 'px';
+  });
+}
+
+// 保留旧函数以兼容（但不再使用）
+window.llmChat = async function () {};
+window.stopChat = function() { stopChatPlayground(); };
 
 async function streamChat(body, out) {
   chatAbortController = new AbortController();
@@ -341,11 +610,9 @@ async function streamChat(body, out) {
       if (data === '[DONE]') continue;
       try {
         const obj = JSON.parse(data);
-        if (obj.error) { throw new Error(obj.error); }
-        // OpenAI 格式：choices[0].delta.content
+        if (obj.error) { throw new Error(typeof obj.error === 'string' ? obj.error : obj.error.message || obj.error); }
         const delta = obj.choices?.[0]?.delta?.content;
         if (delta) { fullText += delta; out.textContent = fullText; }
-        // Anthropic 格式：content_block_delta
         const anthDelta = obj.delta?.text;
         if (anthDelta) { fullText += anthDelta; out.textContent = fullText; }
       } catch { /* 非 JSON 行忽略 */ }
@@ -353,10 +620,6 @@ async function streamChat(body, out) {
   }
   if (!fullText) out.textContent = '(空响应)';
 }
-
-window.stopChat = function () {
-  if (chatAbortController) chatAbortController.abort();
-};
 
 // ===== Usage =====
 async function loadUsage() {
@@ -412,6 +675,61 @@ async function loadStats() {
 }
 
 // ===== 审计日志（新增）=====
+let auditEventSource = null;
+
+function appendAuditEntry(x) {
+  const list = el('audit-list');
+  if (!list) return;
+  const emptyMsg = list.querySelector('.muted');
+  if (emptyMsg && emptyMsg.textContent.includes('暂无审计记录')) {
+    list.innerHTML = '';
+  }
+  const loading = list.querySelector('.loading');
+  if (loading) return;
+  const time = x.created_at?.replace('T', ' ').slice(0, 19) || '-';
+  const detailStr = x.detail ? Object.entries(x.detail).map(([k, v]) => `${k}=${esc(String(v))}`).join(' ') : '';
+  const item = document.createElement('div');
+  item.className = 'audit-item';
+  item.style.animation = 'fadeInUp 0.3s ease';
+  item.innerHTML = `
+    <span class="audit-time">${time}</span>
+    <span class="audit-action ${x.success ? '' : 'failed'}">${esc(x.action)}</span>
+    <span class="audit-detail">${esc(x.target || '')}${detailStr ? ' · ' + detailStr : ''}</span>
+    <span class="audit-actor">${esc(x.actor)}</span>
+  `;
+  list.insertBefore(item, list.firstChild);
+  while (list.children.length > 200) {
+    list.removeChild(list.lastChild);
+  }
+}
+
+function connectAuditSSE() {
+  disconnectAuditSSE();
+  try {
+    auditEventSource = new EventSource('/api/events/audit');
+    auditEventSource.onmessage = (e) => {
+      try {
+        const entry = JSON.parse(e.data);
+        appendAuditEntry(entry);
+      } catch (err) {
+        console.error('audit sse parse:', err);
+      }
+    };
+    auditEventSource.onerror = () => {
+      console.log('[audit sse] connection error, will retry');
+    };
+  } catch (e) {
+    console.error('audit sse connect:', e);
+  }
+}
+
+function disconnectAuditSSE() {
+  if (auditEventSource) {
+    auditEventSource.close();
+    auditEventSource = null;
+  }
+}
+
 async function loadAudit() {
   if (!el('audit-list')) return;
   const action = el('a-action')?.value || '';
@@ -421,18 +739,19 @@ async function loadAudit() {
     const list = await api(url);
     if (!list.length) {
       el('audit-list').innerHTML = '<div class="muted" style="padding:24px;text-align:center">暂无审计记录</div>';
-      return;
+    } else {
+      el('audit-list').innerHTML = list.map(x => {
+        const time = x.created_at?.replace('T', ' ').slice(0, 19) || '-';
+        const detailStr = x.detail ? Object.entries(x.detail).map(([k, v]) => `${k}=${esc(String(v))}`).join(' ') : '';
+        return `<div class="audit-item">
+          <span class="audit-time">${time}</span>
+          <span class="audit-action ${x.success ? '' : 'failed'}">${esc(x.action)}</span>
+          <span class="audit-detail">${esc(x.target || '')}${detailStr ? ' · ' + detailStr : ''}</span>
+          <span class="audit-actor">${esc(x.actor)}</span>
+        </div>`;
+      }).join('');
     }
-    el('audit-list').innerHTML = list.map(x => {
-      const time = x.created_at?.replace('T', ' ').slice(0, 19) || '-';
-      const detailStr = x.detail ? Object.entries(x.detail).map(([k, v]) => `${k}=${esc(String(v))}`).join(' ') : '';
-      return `<div class="audit-item">
-        <span class="audit-time">${time}</span>
-        <span class="audit-action ${x.success ? '' : 'failed'}">${esc(x.action)}</span>
-        <span class="audit-detail">${esc(x.target || '')}${detailStr ? ' · ' + detailStr : ''}</span>
-        <span class="audit-actor">${esc(x.actor)}</span>
-      </div>`;
-    }).join('');
+    connectAuditSSE();
   } catch (e) { toast(e.message, 'error'); }
 }
 window.loadAudit = loadAudit;

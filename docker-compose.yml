@@ -6,9 +6,19 @@ services:
     ports:
       - "127.0.0.1:8000:8000"
     volumes:
-      - ./data:/app/data
+      - keyhub-data:/app/data
       - ./.env:/app/.env:ro
     environment:
       - KEYHUB_ENV=production
       # 生产环境强烈建议通过环境变量注入主密码而非写入 .env
       # - KEYHUB_MASTER_PASSWORD=your-strong-password
+      # - KEYHUB_SECRET_KEY=your-secret-key
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  keyhub-data:

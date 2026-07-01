@@ -100,6 +100,9 @@ def _auto_migrate() -> None:
             ("monthly_budget_usd", "FLOAT DEFAULT 0.0"),
             ("avg_latency_ms", "INTEGER DEFAULT 0"),
         ],
+        "rotation_log": [
+            ("encrypted_value", "BLOB"),
+        ],
     }
 
     with engine.begin() as conn:

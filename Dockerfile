@@ -1,21 +1,38 @@
-FROM python:3.11-slim
+FROM python:3.11-slim AS builder
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1
 
-WORKDIR /app
+WORKDIR /build
 
-# 先装依赖（利用缓存层）
 COPY pyproject.toml README.md ./
 COPY keyhub ./keyhub
-RUN pip install --no-cache-dir -e .
 
-# 数据目录
+RUN pip install --no-cache-dir --prefix=/install .
+
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    KEYHUB_HOST=0.0.0.0 \
+    KEYHUB_PORT=8000
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY --from=builder /install /usr/local
+
 RUN mkdir -p /app/data
 VOLUME ["/app/data"]
 
 EXPOSE 8000
 
-# 默认启动服务；初始化请用 docker compose run keyhub init
-CMD ["keyhub", "serve", "--host", "0.0.0.0", "--port", "8000"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/system/healthz', timeout=3)" || exit 1
+
+CMD ["uvicorn", "keyhub.main:app", "--host", "0.0.0.0", "--port", "8000"]

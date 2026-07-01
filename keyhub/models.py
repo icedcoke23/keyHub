@@ -117,6 +117,7 @@ class LLMKeyStatus(str, enum.Enum):
     rate_limited = "rate_limited"  # 被限流，冷却中
     exhausted = "exhausted"    # 配额耗尽
     error = "error"
+    circuit_breaker = "circuit_breaker"  # 熔断器打开，连续失败过多
 
 
 class LLMKey(Base):
@@ -207,6 +208,8 @@ class RotationLog(Base):
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 旧值的指纹（SHA256 前 8 位），用于审计比对，不含明文
     old_fingerprint: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # 轮换前的旧密文（加密存储），用于回滚
+    encrypted_value: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
 
     credential: Mapped[Credential] = relationship(back_populates="rotations")
 
@@ -249,6 +252,7 @@ class AuditAction(str, enum.Enum):
     token_rate_limited = "token.rate_limited"
     # 凭证扩展
     credential_import = "credential.import"
+    credential_rollback = "credential.rollback"
     # 系统
     backup_export = "backup.export"
     backup_import = "backup.import"

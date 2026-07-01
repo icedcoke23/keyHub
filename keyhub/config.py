@@ -49,13 +49,21 @@ class Settings(BaseSettings):
     llm_read_timeout: int = 120
     # 响应缓存 TTL（秒），0 = 禁用
     llm_cache_ttl: int = 300
-    # 负载均衡策略：round_robin / latency / cost / weighted
+    # 负载均衡策略：round_robin / latency / cost / weighted / least_used
     llm_balance_strategy: str = "round_robin"
+    # 跨 Provider 降级：同 provider 无可用 key 时，尝试其他 provider 同模型名 key
+    llm_enable_cross_provider_fallback: bool = False
 
     # 空闲自动锁定（秒），0 = 禁用
     auto_lock_idle_seconds: int = 1800
     # API Token 速率限制（每分钟请求数，0 = 禁用）
     token_rpm_limit: int = 60
+    # 每 Key RPM 限制（每分钟请求数，0 = 禁用）
+    llm_key_rpm_limit: int = 0
+    # 每 Key TPM 限制（每分钟 token 数，0 = 禁用）
+    llm_key_tpm_limit: int = 0
+    # LLM 最大并发请求数（0 = 不限）
+    llm_max_concurrent: int = 0
     # 审计日志保留天数（0 = 禁用自动清理）
     audit_retention_days: int = 0
 

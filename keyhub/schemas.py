@@ -165,3 +165,11 @@ class RotationReminder(BaseModel):
     last_rotated_at: datetime | None
     days_until_expire: int | None
     days_since_rotation: int | None
+
+
+class RotationLogOut(BaseModel):
+    id: str
+    credential_id: str
+    rotated_at: datetime
+    note: str | None
+    old_fingerprint: str | None

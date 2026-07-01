@@ -27,6 +27,7 @@ from ..audit import record as audit_record
 from ..auth import require_auth
 from ..config import get_settings
 from ..db import session_scope
+from ..llm.aliases import get_alias_manager
 from ..llm.balancer import NoAvailableKeyError, get_balancer
 from ..llm.proxy import LLMProxyError, chat, chat_stream
 from ..llm.providers import PRICING, get_provider
@@ -90,8 +91,11 @@ def chat_completions(body: dict[str, Any], actor: str = Depends(require_auth)):
             err_type="invalid_request_error",
         )
 
-    # 供应商推断：显式 keyhub_provider 优先于模型名前缀
-    provider = body.get("keyhub_provider") or infer_provider(model)
+    alias_mgr = get_alias_manager()
+    explicit_provider = body.get("keyhub_provider")
+    initial_provider = explicit_provider or infer_provider(model)
+    provider, resolved_model = alias_mgr.resolve(initial_provider, model)
+    model = resolved_model
 
     messages = body.get("messages") or []
     temperature = body.get("temperature")
@@ -191,7 +195,13 @@ def embeddings(body: dict[str, Any], actor: str = Depends(require_auth)):
             err_type="invalid_request_error",
         )
 
-    provider = body.get("keyhub_provider") or infer_provider(model)
+    alias_mgr = get_alias_manager()
+    explicit_provider = body.get("keyhub_provider")
+    initial_provider = explicit_provider or infer_provider(model)
+    provider, model = alias_mgr.resolve(initial_provider, model)
+
+    settings = get_settings()
+    balancer = get_balancer()
 
     audit_record(
         AuditAction.llm_proxy_call,
@@ -209,66 +219,86 @@ def embeddings(body: dict[str, Any], actor: str = Depends(require_auth)):
                 err_type="upstream_error",
             )
 
-        balancer = get_balancer()
         try:
             key = balancer.pick(provider, model)
         except NoAvailableKeyError:
-            return _openai_error(
-                502,
-                f"no available key for provider='{provider}'",
-                err_type="upstream_error",
-            )
-
-        # 取明文 key：关联 credential.encrypted_value
-        with session_scope() as s:
-            row = s.execute(
-                select(LLMKey, Credential.encrypted_value)
-                .join(Credential, LLMKey.credential_id == Credential.id)
-                .where(LLMKey.id == key.id)
-            ).one_or_none()
-            if row is None:
-                balancer.mark_error(key.id)
+            if settings.llm_enable_cross_provider_fallback:
+                try:
+                    provider, key = balancer.pick_cross_provider(model, exclude_provider=initial_provider)
+                    cfg = get_provider(provider)
+                    if not cfg.base_url:
+                        balancer.release(key.id)
+                        return _openai_error(
+                            502,
+                            f"no available key for model='{model}'",
+                            err_type="upstream_error",
+                        )
+                except NoAvailableKeyError:
+                    return _openai_error(
+                        502,
+                        f"no available key for model='{model}'",
+                        err_type="upstream_error",
+                    )
+            else:
                 return _openai_error(
                     502,
-                    "selected key not found in database",
+                    f"no available key for provider='{provider}'",
                     err_type="upstream_error",
                 )
-            enc_value = row[1]
-
-        api_key = get_runtime().vault.decrypt(enc_value)
-
-        # 剔除 keyhub_provider 后透传请求体
-        req_body = {k: v for k, v in body.items() if k != "keyhub_provider"}
-
-        headers = {"Content-Type": "application/json"}
-        if cfg.header_name:
-            headers[cfg.header_name] = f"{cfg.header_prefix}{api_key}"
-        if cfg.name == "anthropic":
-            headers["anthropic-version"] = "2023-06-01"
-
-        url = cfg.base_url.rstrip("/") + "/v1/embeddings"
-        settings = get_settings()
 
         try:
-            with httpx.Client(timeout=settings.llm_timeout) as client:
-                r = client.post(url, headers=headers, json=req_body)
-        except httpx.RequestError as e:
-            balancer.mark_error(key.id)
-            return _openai_error(502, str(e), err_type="upstream_error")
+            with session_scope() as s:
+                row = s.execute(
+                    select(LLMKey, Credential.encrypted_value, Credential.name)
+                    .join(Credential, LLMKey.credential_id == Credential.id)
+                    .where(LLMKey.id == key.id)
+                ).one_or_none()
+                if row is None:
+                    balancer.mark_error(key.id)
+                    return _openai_error(
+                        502,
+                        "selected key not found in database",
+                        err_type="upstream_error",
+                    )
+                enc_value, cred_name = row[1], row[2]
 
-        # 反馈 key 健康状态
-        if r.status_code == 429:
-            balancer.mark_rate_limited(key.id)
-        elif r.status_code >= 400:
-            balancer.mark_error(key.id)
-        else:
-            balancer.mark_ok(key.id)
+            from ..llm.proxy import _decrypt_key
+            api_key = _decrypt_key(key.id, enc_value, cred_name or key.id)
 
-        # 响应原样返回（保留上游状态码与 body）
-        return Response(
-            content=r.content,
-            status_code=r.status_code,
-            media_type=r.headers.get("content-type", "application/json"),
-        )
+            req_body = {k: v for k, v in body.items() if k != "keyhub_provider"}
+            req_body["model"] = model
+
+            headers = {"Content-Type": "application/json"}
+            if cfg.header_name:
+                headers[cfg.header_name] = f"{cfg.header_prefix}{api_key}"
+            if cfg.name == "anthropic":
+                headers["anthropic-version"] = "2023-06-01"
+
+            url = cfg.base_url.rstrip("/") + "/v1/embeddings"
+
+            try:
+                with httpx.Client(timeout=settings.llm_timeout) as client:
+                    r = client.post(url, headers=headers, json=req_body)
+            except httpx.RequestError as e:
+                balancer.mark_error(key.id)
+                return _openai_error(502, str(e), err_type="upstream_error")
+
+            if r.status_code == 429:
+                from ..llm.balancer import _parse_retry_after
+                retry_after_val = _parse_retry_after(r.headers.get("Retry-After"))
+                balancer.mark_rate_limited(key.id, retry_after=retry_after_val)
+            elif r.status_code >= 400:
+                balancer.mark_error(key.id)
+            else:
+                balancer.mark_ok(key.id)
+
+            return Response(
+                content=r.content,
+                status_code=r.status_code,
+                media_type=r.headers.get("content-type", "application/json"),
+            )
+        except Exception:
+            balancer.release(key.id)
+            raise
     except Exception as e:  # noqa: BLE001
         return _openai_error(500, str(e), err_type="internal_error")

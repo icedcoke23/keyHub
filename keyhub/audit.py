@@ -23,19 +23,38 @@ def record(
     detail: dict[str, Any] | None = None,
 ) -> None:
     """记录一条审计日志。失败不应抛异常（审计独立于业务）。"""
+    entry_id = None
     try:
         with session_scope() as s:
-            s.add(AuditLog(
+            log = AuditLog(
                 action=action,
                 actor=actor,
                 target=target,
                 success=success,
                 detail=detail or {},
                 created_at=datetime.utcnow(),
-            ))
+            )
+            s.add(log)
+            s.flush()
+            entry_id = log.id
     except Exception as e:  # noqa: BLE001
-        # 审计写入失败不应影响主流程，仅打印告警
         print(f"[audit] failed to record {action.value}: {e}", flush=True)
+        return
+
+    try:
+        from .api.events import get_broadcaster
+        event = {
+            "id": entry_id,
+            "action": action.value,
+            "actor": actor,
+            "target": target,
+            "success": success,
+            "detail": detail or {},
+            "created_at": datetime.utcnow().isoformat(),
+        }
+        get_broadcaster().broadcast(event)
+    except Exception as e:  # noqa: BLE001
+        print(f"[audit] failed to broadcast event: {e}", flush=True)
 
 
 def list_logs(

@@ -80,6 +80,9 @@ def create_app() -> FastAPI:
     app.include_router(llm_api.router)
     app.include_router(rot_api.router)
     app.include_router(audit_api.router)
+    # 实时事件 SSE
+    from .api import events as events_api
+    app.include_router(events_api.router)
     # OpenAI 兼容 API
     from .api import v1 as v1_api
     app.include_router(v1_api.router)

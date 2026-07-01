@@ -94,7 +94,7 @@ def test_auth_and_credential_crud():
     check("Session Cookie 已建立", SESSION_COOKIE is not None)
 
     # 1.5 状态查询
-    r = req("GET", "/api/status")
+    r = req("GET", "/api/system/status")
     data = jget(r)
     check("解锁后状态正确", data.get("unlocked") is True, f"status={data}")
 

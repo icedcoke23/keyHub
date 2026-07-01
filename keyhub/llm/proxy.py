@@ -11,28 +11,67 @@
 from __future__ import annotations
 
 import json
+import random
+import threading
 import time
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 
 from ..config import get_settings
 from ..runtime import get_runtime
-from .balancer import NoAvailableKeyError, get_balancer
+from .aliases import get_alias_manager
+from .balancer import NoAvailableKeyError, _parse_retry_after, get_balancer
 from .providers import estimate_cost, get_provider
 from .tracker import record_usage
+
+_semaphore: Optional[threading.Semaphore] = None
+_semaphore_lock = threading.Lock()
+
+
+def _get_semaphore() -> Optional[threading.Semaphore]:
+    """获取全局并发信号量（懒加载，0 表示不限）。"""
+    global _semaphore
+    with _semaphore_lock:
+        if _semaphore is not None:
+            return _semaphore
+        settings = get_settings()
+        max_conc = settings.llm_max_concurrent
+        if max_conc and max_conc > 0:
+            _semaphore = threading.Semaphore(max_conc)
+        else:
+            _semaphore = None
+        return _semaphore
 
 
 class LLMProxyError(RuntimeError):
     pass
 
 
+def _backoff_wait(attempt: int) -> None:
+    """指数退避+抖动。
+    - attempt=0（首次尝试）: 不等待
+    - attempt=1（第一次重试，第一个 key 失败后）: 不等待，直接切换
+    - attempt>=2（第二次重试起）: wait = min(max_ms, base_ms*2^attempt) + random.uniform(0, base_ms)
+    """
+    if attempt < 2:
+        return
+    base_ms = 200
+    max_ms = 5000
+    wait_ms = min(max_ms, base_ms * (2 ** attempt))
+    jitter = random.uniform(0, base_ms)
+    total_s = (wait_ms + jitter) / 1000.0
+    try:
+        time.sleep(total_s)
+    except Exception:
+        pass
+
+
 def _friendly_error(err: Exception | str) -> str:
     """将底层异常转换为用户友好的中文提示，隐藏原始堆栈/SSL 细节。"""
     msg = str(err)
 
-    # 网络/SSL 类错误
     if "UNEXPECTED_EOF" in msg or "EOF in violation" in msg:
         return "上游连接异常断开，请检查网络或 LLM 服务可用性"
     if "SSLError" in msg or "ssl" in msg.lower():
@@ -44,34 +83,30 @@ def _friendly_error(err: Exception | str) -> str:
     if "ConnectTimeout" in msg or "ReadTimeout" in msg:
         return "LLM 调用超时，请稍后重试或调整超时设置"
 
-    # 限流
     if "rate_limited" in msg or "429" in msg:
         return "LLM 上游限流（429），请稍后重试"
 
-    # 鉴权类
     if "401" in msg or "Unauthorized" in msg:
         return "LLM API Key 无效或已失效（401），请检查 key"
     if "403" in msg or "Forbidden" in msg:
         return "LLM API Key 无权限（403），请检查 key 配置"
 
-    # key 耗尽
     if "all keys exhausted" in msg or "all retries failed" in msg:
         return "所有可用 key 已耗尽或全部失败，请检查 key 状态与网络"
 
-    # 上游错误（保留状态码）
     if "upstream 5" in msg:
         return "LLM 上游服务异常（5xx），请稍后重试"
     if "upstream 4" in msg:
         return "LLM 上游拒绝请求（4xx），请检查模型名与参数"
 
-    # 兜底：截断过长的技术信息
     if len(msg) > 120:
         return msg[:120] + "…"
     return msg
 
 
-def _decrypt_key(llm_key_id: str, credential_encrypted_value: bytes) -> str:
-    return get_runtime().vault.decrypt(credential_encrypted_value)
+def _decrypt_key(llm_key_id: str, credential_encrypted_value: bytes, cred_name: str = "") -> str:
+    from ..store import reveal_raw
+    return reveal_raw(llm_key_id, credential_encrypted_value, cred_name)
 
 
 def _record_failed(
@@ -83,11 +118,7 @@ def _record_failed(
     err_msg: str,
     provider: str,
 ) -> None:
-    """记录失败的 LLM 调用到 usage_logs（success=False）。
-
-    成本按实际消耗 token 估算（多数失败无 token 消耗，cost=0）。
-    provider 参数仅用于日志可读性，不参与估算。
-    """
+    """记录失败的 LLM 调用到 usage_logs（success=False）。"""
     try:
         record_usage(
             llm_key_id=key_id,
@@ -99,8 +130,7 @@ def _record_failed(
             success=False,
             error=err_msg[:500] if err_msg else None,
         )
-    except Exception as e:  # noqa: BLE001
-        # 用量记录失败不应影响主流程
+    except Exception as e:
         print(f"[llm] failed to record usage: {e}", flush=True)
 
 
@@ -113,7 +143,6 @@ def _build_request(
     headers = {"Content-Type": "application/json"}
     if cfg.header_name:
         headers[cfg.header_name] = f"{cfg.header_prefix}{api_key}"
-    # Anthropic 额外需要 version 头
     if cfg.name == "anthropic":
         headers["anthropic-version"] = "2023-06-01"
 
@@ -122,7 +151,6 @@ def _build_request(
     if cfg.openai_compatible:
         return url, headers, body
 
-    # Anthropic 格式转换：OpenAI messages -> Anthropic messages
     if cfg.name == "anthropic":
         sys_msgs = [m["content"] for m in body.get("messages", []) if m.get("role") == "system"]
         user_msgs = [m for m in body.get("messages", []) if m.get("role") != "system"]
@@ -151,6 +179,26 @@ def _parse_usage(cfg, resp_json: dict[str, Any]) -> tuple[int, int]:
     return 0, 0
 
 
+def _acquire_semaphore(timeout: float) -> bool:
+    """尝试获取并发信号量，返回是否成功。"""
+    sem = _get_semaphore()
+    if sem is None:
+        return True
+    try:
+        return sem.acquire(timeout=timeout)
+    except Exception:
+        return True
+
+
+def _release_semaphore() -> None:
+    sem = _get_semaphore()
+    if sem is not None:
+        try:
+            sem.release()
+        except Exception:
+            pass
+
+
 def chat(
     provider: str,
     model: str,
@@ -162,12 +210,14 @@ def chat(
     max_retries: int = 3,
 ) -> dict[str, Any]:
     """同步代理调用，返回上游响应 JSON。"""
+    alias_mgr = get_alias_manager()
+    provider, model = alias_mgr.resolve(provider, model)
+
     cfg = get_provider(provider)
     if not cfg.base_url:
         raise LLMProxyError(f"provider '{provider}' has no base_url configured")
 
     settings = get_settings()
-    # 响应缓存检查
     from .cache import get_cache
     cache = get_cache()
     cached = cache.get(provider, model, messages, temperature, settings.llm_cache_ttl)
@@ -178,7 +228,6 @@ def chat(
         except Exception:
             pass
         return cached
-    # 缓存未命中
     try:
         from ..metrics import llm_cache_misses
         llm_cache_misses.inc()
@@ -198,45 +247,85 @@ def chat(
 
     balancer = get_balancer()
     last_error: Exception | None = None
+    current_provider = provider
+    current_cfg = cfg
+    fallback_tried = False
 
     for attempt in range(max_retries):
-        try:
-            key = balancer.pick(provider, model)
-        except NoAvailableKeyError:
-            # 无可用 key 也算一次失败，记录指标
-            try:
-                from ..metrics import llm_requests_total
-                llm_requests_total.labels(provider=provider, model=model, status="fail").inc()
-            except Exception:
-                pass
-            if last_error:
-                raise LLMProxyError(_friendly_error(last_error)) from last_error
-            raise LLMProxyError(f"没有可用的 key（provider={provider}, model={model}），请在控制台添加") from None
+        if attempt > 0:
+            _backoff_wait(attempt)
 
-        # 预算检查：累计成本超过月度预算则停用该 key 并重试下一个
-        if key.monthly_budget_usd > 0 and key.estimated_cost_usd >= key.monthly_budget_usd:
-            _check_budget_exceeded(key.id, key.estimated_cost_usd, key.monthly_budget_usd, provider)
+        if not _acquire_semaphore(settings.llm_connect_timeout):
+            last_error = LLMProxyError("LLM 并发请求数已达上限，请稍后重试")
             continue
 
-        # 取明文 key：需要关联的 credential.encrypted_value
+        try:
+            key = balancer.pick(current_provider, model)
+        except NoAvailableKeyError:
+            _release_semaphore()
+            if settings.llm_enable_cross_provider_fallback and not fallback_tried:
+                fallback_tried = True
+                try:
+                    fallback_provider, fallback_key = balancer.pick_cross_provider(model, exclude_provider=provider)
+                    current_provider = fallback_provider
+                    current_cfg = get_provider(current_provider)
+                    key = fallback_key
+                except NoAvailableKeyError:
+                    try:
+                        from ..metrics import llm_requests_total
+                        llm_requests_total.labels(provider=provider, model=model, status="fail").inc()
+                    except Exception:
+                        pass
+                    if last_error:
+                        raise LLMProxyError(_friendly_error(last_error)) from last_error
+                    raise LLMProxyError(f"没有可用的 key（provider={provider}, model={model}），请在控制台添加") from None
+            else:
+                try:
+                    from ..metrics import llm_requests_total
+                    llm_requests_total.labels(provider=provider, model=model, status="fail").inc()
+                except Exception:
+                    pass
+                if last_error:
+                    raise LLMProxyError(_friendly_error(last_error)) from last_error
+                raise LLMProxyError(f"没有可用的 key（provider={provider}, model={model}），请在控制台添加") from None
+
+        if key.monthly_budget_usd > 0 and key.estimated_cost_usd >= key.monthly_budget_usd:
+            _check_budget_exceeded(key.id, key.estimated_cost_usd, key.monthly_budget_usd, current_provider)
+            balancer.release(key.id)
+            _release_semaphore()
+            continue
+
         from ..models import Credential, LLMKey
         from ..db import session_scope
         from sqlalchemy import select
 
         with session_scope() as s:
             row = s.execute(
-                select(LLMKey, Credential.encrypted_value)
+                select(LLMKey, Credential.encrypted_value, Credential.name)
                 .join(Credential, LLMKey.credential_id == Credential.id)
                 .where(LLMKey.id == key.id)
             ).one_or_none()
             if row is None:
                 balancer.mark_error(key.id)
+                _release_semaphore()
                 continue
-            llm_key, enc_value = row
+            llm_key, enc_value, cred_name = row
             s.expunge(llm_key)
 
-        api_key = _decrypt_key(llm_key.id, enc_value)
-        url, headers, req_body = _build_request(cfg, api_key, body)
+        try:
+            from .keylimit import get_key_rate_limiter
+            limiter = get_key_rate_limiter()
+            allowed, _, _ = limiter.check(key.id, tokens=0)
+            if not allowed:
+                balancer.mark_rate_limited(key.id, retry_after=10.0)
+                last_error = LLMProxyError("key rate limit exceeded")
+                _release_semaphore()
+                continue
+        except Exception:
+            pass
+
+        api_key = _decrypt_key(llm_key.id, enc_value, cred_name or key.id)
+        url, headers, req_body = _build_request(current_cfg, api_key, body)
 
         t0 = time.monotonic()
         success = False
@@ -244,7 +333,6 @@ def chat(
         prompt_tokens = completion_tokens = 0
         resp_json: dict[str, Any] = {}
         latency_ms = 0
-        # 是否真正向上游发出了请求（用于决定是否记录 usage）
         request_sent = False
 
         try:
@@ -260,36 +348,38 @@ def chat(
             latency_ms = int((time.monotonic() - t0) * 1000)
 
             if r.status_code == 429:
-                balancer.mark_rate_limited(key.id)
+                retry_after_val = _parse_retry_after(r.headers.get("Retry-After"))
+                balancer.mark_rate_limited(key.id, retry_after=retry_after_val)
                 err_msg = "rate_limited (429)"
                 last_error = LLMProxyError(err_msg)
-                # 部分上游在 429 时仍返回 usage，尽量解析
                 try:
-                    prompt_tokens, completion_tokens = _parse_usage(cfg, r.json())
+                    prompt_tokens, completion_tokens = _parse_usage(current_cfg, r.json())
                 except Exception:
                     pass
                 _record_failed(key.id, model, prompt_tokens, completion_tokens,
-                               latency_ms, err_msg, provider)
+                               latency_ms, err_msg, current_provider)
                 try:
                     from ..metrics import llm_requests_total
-                    llm_requests_total.labels(provider=provider, model=model, status="fail").inc()
+                    llm_requests_total.labels(provider=current_provider, model=model, status="fail").inc()
                 except Exception:
                     pass
+                _release_semaphore()
                 continue
             if r.status_code >= 400:
                 balancer.mark_error(key.id)
                 err_msg = f"upstream {r.status_code}: {r.text[:200]}"
                 last_error = LLMProxyError(err_msg)
-                _record_failed(key.id, model, 0, 0, latency_ms, err_msg, provider)
+                _record_failed(key.id, model, 0, 0, latency_ms, err_msg, current_provider)
                 try:
                     from ..metrics import llm_requests_total
-                    llm_requests_total.labels(provider=provider, model=model, status="fail").inc()
+                    llm_requests_total.labels(provider=current_provider, model=model, status="fail").inc()
                 except Exception:
                     pass
+                _release_semaphore()
                 continue
 
             resp_json = r.json()
-            prompt_tokens, completion_tokens = _parse_usage(cfg, resp_json)
+            prompt_tokens, completion_tokens = _parse_usage(current_cfg, resp_json)
             success = True
         except (httpx.RequestError, ValueError) as e:
             latency_ms = int((time.monotonic() - t0) * 1000)
@@ -297,16 +387,23 @@ def chat(
             err_msg = str(e)
             last_error = e
             if request_sent:
-                _record_failed(key.id, model, 0, 0, latency_ms, err_msg, provider)
+                _record_failed(key.id, model, 0, 0, latency_ms, err_msg, current_provider)
                 try:
                     from ..metrics import llm_requests_total
-                    llm_requests_total.labels(provider=provider, model=model, status="fail").inc()
+                    llm_requests_total.labels(provider=current_provider, model=model, status="fail").inc()
                 except Exception:
                     pass
+            _release_semaphore()
             continue
 
-        # 成功：记录用量并返回
-        cost = estimate_cost(provider, model, prompt_tokens, completion_tokens)
+        total_tokens = prompt_tokens + completion_tokens
+        try:
+            from .keylimit import get_key_rate_limiter
+            get_key_rate_limiter().record(key.id, tokens=total_tokens)
+        except Exception:
+            pass
+
+        cost = estimate_cost(current_provider, model, prompt_tokens, completion_tokens)
         record_usage(
             llm_key_id=key.id,
             model=model,
@@ -318,33 +415,36 @@ def chat(
             error=None,
         )
         balancer.mark_ok(key.id, latency_ms)
-        # 指标更新
         try:
             from ..metrics import llm_request_duration, llm_cost_total, llm_tokens_total, llm_requests_total
-            llm_requests_total.labels(provider=provider, model=model, status="ok").inc()
-            llm_request_duration.labels(provider=provider, model=model).observe(latency_ms / 1000)
-            llm_cost_total.labels(provider=provider, model=model).inc(cost)
-            llm_tokens_total.labels(provider=provider, model=model, kind="prompt").inc(prompt_tokens)
-            llm_tokens_total.labels(provider=provider, model=model, kind="completion").inc(completion_tokens)
+            llm_requests_total.labels(provider=current_provider, model=model, status="ok").inc()
+            llm_request_duration.labels(provider=current_provider, model=model).observe(latency_ms / 1000)
+            llm_cost_total.labels(provider=current_provider, model=model).inc(cost)
+            llm_tokens_total.labels(provider=current_provider, model=model, kind="prompt").inc(prompt_tokens)
+            llm_tokens_total.labels(provider=current_provider, model=model, kind="completion").inc(completion_tokens)
         except Exception:
             pass
-        # 延迟记录
         try:
             from .latency_stats import get_latency_stats
-            get_latency_stats().record(provider, latency_ms)
+            get_latency_stats().record(current_provider, latency_ms)
         except Exception:
             pass
-        # 写入缓存
-        cache.set(provider, model, messages, temperature, resp_json)
+        cache.set(current_provider, model, messages, temperature, resp_json)
+        _release_semaphore()
         return resp_json
 
-    # 全部重试失败
     if last_error:
         raise LLMProxyError(_friendly_error(last_error)) from last_error
     raise LLMProxyError("调用失败，原因未知")
 
 
 # ===== 流式 =====
+
+def _make_sse_error(message: str) -> bytes:
+    """构造 SSE 错误事件。"""
+    payload = json.dumps({"error": {"message": message, "type": "stream_error"}})
+    return f"data: {payload}\n\n".encode("utf-8")
+
 
 def chat_stream(
     provider: str,
@@ -356,11 +456,10 @@ def chat_stream(
     extra: dict[str, Any] | None = None,
     max_retries: int = 3,
 ):
-    """流式代理调用，生成 SSE 原始行（bytes）。
+    """流式代理调用，生成 SSE 原始行（bytes）。"""
+    alias_mgr = get_alias_manager()
+    provider, model = alias_mgr.resolve(provider, model)
 
-    上游响应体原样透传（OpenAI/Anthropic 均为 SSE 格式 `data: ...\n\n`），
-    下游可直接转发。流结束后解析最后一个 chunk 的 usage 记录用量。
-    """
     cfg = get_provider(provider)
     if not cfg.base_url:
         raise LLMProxyError(f"provider '{provider}' has no base_url configured")
@@ -384,39 +483,101 @@ def chat_stream(
     from sqlalchemy import select
 
     last_error: Exception | None = None
+    current_provider = provider
+    current_cfg = cfg
+    fallback_tried = False
+
     for attempt in range(max_retries):
-        try:
-            key = balancer.pick(provider, model)
-        except NoAvailableKeyError:
-            # 无可用 key 也算一次失败，记录指标
-            try:
-                from ..metrics import llm_requests_total
-                llm_requests_total.labels(provider=provider, model=model, status="fail").inc()
-            except Exception:
-                pass
-            if last_error:
-                raise LLMProxyError(_friendly_error(last_error)) from last_error
-            raise LLMProxyError(f"没有可用的 key（provider={provider}, model={model}），请在控制台添加") from None
+        if attempt > 0:
+            _backoff_wait(attempt)
 
-        with session_scope() as s:
-            row = s.execute(
-                select(LLMKey, Credential.encrypted_value)
-                .join(Credential, LLMKey.credential_id == Credential.id)
-                .where(LLMKey.id == key.id)
-            ).one_or_none()
-            if row is None:
-                balancer.mark_error(key.id)
-                continue
-            llm_key, enc_value = row
-            s.expunge(llm_key)
-
-        api_key = _decrypt_key(llm_key.id, enc_value)
-        url, headers, req_body = _build_request(cfg, api_key, body)
-
+        sem_held = False
+        upstream_started = False
+        key = None
         t0 = time.monotonic()
         prompt_tokens = completion_tokens = 0
-        upstream_started = False
+
+        if not _acquire_semaphore(settings.llm_connect_timeout):
+            last_error = LLMProxyError("LLM 并发请求数已达上限，请稍后重试")
+            continue
+        sem_held = True
+
+        def _cleanup():
+            nonlocal sem_held
+            if sem_held:
+                _release_semaphore()
+                sem_held = False
+
         try:
+            try:
+                key = balancer.pick(current_provider, model)
+            except NoAvailableKeyError:
+                if settings.llm_enable_cross_provider_fallback and not fallback_tried:
+                    fallback_tried = True
+                    try:
+                        fallback_provider, fallback_key = balancer.pick_cross_provider(model, exclude_provider=provider)
+                        current_provider = fallback_provider
+                        current_cfg = get_provider(current_provider)
+                        key = fallback_key
+                    except NoAvailableKeyError:
+                        _cleanup()
+                        try:
+                            from ..metrics import llm_requests_total
+                            llm_requests_total.labels(provider=provider, model=model, status="fail").inc()
+                        except Exception:
+                            pass
+                        if last_error:
+                            raise LLMProxyError(_friendly_error(last_error)) from last_error
+                        raise LLMProxyError(f"没有可用的 key（provider={provider}, model={model}），请在控制台添加") from None
+                else:
+                    _cleanup()
+                    try:
+                        from ..metrics import llm_requests_total
+                        llm_requests_total.labels(provider=provider, model=model, status="fail").inc()
+                    except Exception:
+                        pass
+                    if last_error:
+                        raise LLMProxyError(_friendly_error(last_error)) from last_error
+                    raise LLMProxyError(f"没有可用的 key（provider={provider}, model={model}），请在控制台添加") from None
+
+            if key.monthly_budget_usd > 0 and key.estimated_cost_usd >= key.monthly_budget_usd:
+                _check_budget_exceeded(key.id, key.estimated_cost_usd, key.monthly_budget_usd, current_provider)
+                balancer.release(key.id)
+                _cleanup()
+                continue
+
+            with session_scope() as s:
+                row = s.execute(
+                    select(LLMKey, Credential.encrypted_value, Credential.name)
+                    .join(Credential, LLMKey.credential_id == Credential.id)
+                    .where(LLMKey.id == key.id)
+                ).one_or_none()
+                if row is None:
+                    balancer.mark_error(key.id)
+                    _cleanup()
+                    continue
+                llm_key, enc_value, cred_name = row
+                s.expunge(llm_key)
+
+            try:
+                from .keylimit import get_key_rate_limiter
+                limiter = get_key_rate_limiter()
+                allowed, _, _ = limiter.check(key.id, tokens=0)
+                if not allowed:
+                    balancer.mark_rate_limited(key.id, retry_after=10.0)
+                    last_error = LLMProxyError("key rate limit exceeded")
+                    _cleanup()
+                    continue
+            except Exception:
+                pass
+
+            api_key = _decrypt_key(llm_key.id, enc_value, cred_name or key.id)
+            url, headers, req_body = _build_request(current_cfg, api_key, body)
+
+            t0 = time.monotonic()
+            prompt_tokens = completion_tokens = 0
+            stream_error: str | None = None
+
             timeout = httpx.Timeout(
                 connect=settings.llm_connect_timeout,
                 read=settings.llm_read_timeout,
@@ -426,60 +587,154 @@ def chat_stream(
             with httpx.Client(timeout=timeout) as client:
                 with client.stream("POST", url, headers=headers, json=req_body) as r:
                     if r.status_code == 429:
-                        balancer.mark_rate_limited(key.id)
+                        retry_after_val = _parse_retry_after(r.headers.get("Retry-After"))
+                        balancer.mark_rate_limited(key.id, retry_after=retry_after_val)
                         last_error = LLMProxyError("rate_limited (429)")
+                        _cleanup()
                         continue
                     if r.status_code >= 400:
                         balancer.mark_error(key.id)
-                        last_error = LLMProxyError(f"upstream {r.status_code}")
+                        err_text = ""
+                        try:
+                            err_text = r.text[:200]
+                        except Exception:
+                            pass
+                        last_error = LLMProxyError(f"upstream {r.status_code}: {err_text}")
+                        _cleanup()
                         continue
                     upstream_started = True
-                    final_usage_chunk = None
+                    last_data_time = time.monotonic()
+                    idle_timeout = settings.llm_read_timeout
+
                     for line in r.iter_lines():
+                        now = time.monotonic()
+                        if now - last_data_time > idle_timeout:
+                            stream_error = f"流式读取超时（{idle_timeout}秒无数据）"
+                            yield _make_sse_error(_friendly_error(stream_error))
+                            break
+                        last_data_time = now
+
                         if not line:
                             continue
-                        # 解析 usage（OpenAI 在最后 chunk 含 usage；Anthropic 在 message_delta 事件含 usage）
-                        s = line.strip() if isinstance(line, str) else line
-                        if isinstance(s, bytes):
+                        s_line = line.strip() if isinstance(line, str) else line
+                        if isinstance(s_line, bytes):
                             try:
-                                s = s.decode("utf-8")
+                                s_line = s_line.decode("utf-8")
                             except Exception:
                                 pass
-                        if isinstance(s, str) and s.startswith("data:"):
-                            payload = s[5:].strip()
+                        if isinstance(s_line, str) and s_line.startswith("data:"):
+                            payload = s_line[5:].strip()
                             if payload and payload != "[DONE]":
                                 try:
                                     chunk_json = json.loads(payload)
-                                    u = _extract_stream_usage(cfg, chunk_json)
+                                    if "error" in chunk_json and isinstance(chunk_json["error"], dict):
+                                        err_msg = chunk_json["error"].get("message", "上游返回错误")
+                                        stream_error = err_msg
+                                        yield _make_sse_error(_friendly_error(err_msg))
+                                        break
+                                    if chunk_json.get("error") and isinstance(chunk_json["error"], str):
+                                        stream_error = chunk_json["error"]
+                                        yield _make_sse_error(_friendly_error(stream_error))
+                                        break
+                                    u = _extract_stream_usage(current_cfg, chunk_json)
                                     if u:
                                         prompt_tokens, completion_tokens = u
-                                        final_usage_chunk = chunk_json
+                                except json.JSONDecodeError:
+                                    pass
                                 except Exception:
                                     pass
-                        # 透传原始行
+                        if stream_error:
+                            break
                         yield line if isinstance(line, bytes) else line.encode("utf-8")
                         yield b"\n"
+
             latency_ms = int((time.monotonic() - t0) * 1000)
-            # 流结束，记录用量
-            cost = estimate_cost(provider, model, prompt_tokens, completion_tokens)
+
+            if stream_error:
+                balancer.mark_error(key.id)
+                _record_failed(key.id, model, prompt_tokens, completion_tokens,
+                               latency_ms, stream_error, current_provider)
+                try:
+                    from ..metrics import llm_requests_total
+                    llm_requests_total.labels(provider=current_provider, model=model, status="fail").inc()
+                except Exception:
+                    pass
+                _cleanup()
+                return
+
+            total_tokens = prompt_tokens + completion_tokens
+            try:
+                from .keylimit import get_key_rate_limiter
+                get_key_rate_limiter().record(key.id, tokens=total_tokens)
+            except Exception:
+                pass
+            cost = estimate_cost(current_provider, model, prompt_tokens, completion_tokens)
             record_usage(
                 llm_key_id=key.id, model=model,
                 prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
                 cost_usd=cost, latency_ms=latency_ms, success=True, error=None,
             )
             balancer.mark_ok(key.id)
+            try:
+                from ..metrics import llm_request_duration, llm_cost_total, llm_tokens_total, llm_requests_total
+                llm_requests_total.labels(provider=current_provider, model=model, status="ok").inc()
+                llm_request_duration.labels(provider=current_provider, model=model).observe(latency_ms / 1000)
+                llm_cost_total.labels(provider=current_provider, model=model).inc(cost)
+                llm_tokens_total.labels(provider=current_provider, model=model, kind="prompt").inc(prompt_tokens)
+                llm_tokens_total.labels(provider=current_provider, model=model, kind="completion").inc(completion_tokens)
+            except Exception:
+                pass
+            try:
+                from .latency_stats import get_latency_stats
+                get_latency_stats().record(current_provider, latency_ms)
+            except Exception:
+                pass
+            _cleanup()
             return
         except (httpx.RequestError, httpx.HTTPStatusError) as e:
             latency_ms = int((time.monotonic() - t0) * 1000)
-            balancer.mark_error(key.id)
+            if key:
+                balancer.mark_error(key.id)
             last_error = e
             if upstream_started:
-                # 流已经开始则无法重试（下游已收到部分数据），记录失败并结束
+                if key:
+                    _record_failed(key.id, model, prompt_tokens, completion_tokens,
+                                   latency_ms, str(e), current_provider)
+                try:
+                    from ..metrics import llm_requests_total
+                    llm_requests_total.labels(provider=current_provider, model=model, status="fail").inc()
+                except Exception:
+                    pass
+                yield _make_sse_error(_friendly_error(e))
+                _cleanup()
+                return
+            if key:
+                _record_failed(key.id, model, 0, 0, latency_ms, str(e), current_provider)
+            _cleanup()
+            continue
+        except GeneratorExit:
+            latency_ms = int((time.monotonic() - t0) * 1000)
+            if key and upstream_started:
                 _record_failed(key.id, model, prompt_tokens, completion_tokens,
-                               latency_ms, str(e), provider)
-                raise LLMProxyError(f"流式中断：{_friendly_error(e)}") from e
-            # 连接阶段失败：记录失败用量后重试下一个 key（与非流式 chat 一致）
-            _record_failed(key.id, model, 0, 0, latency_ms, str(e), provider)
+                               latency_ms, "client disconnected", current_provider)
+                balancer.mark_error(key.id)
+            elif key:
+                balancer.release(key.id)
+            _cleanup()
+            raise
+        except Exception as e:
+            latency_ms = int((time.monotonic() - t0) * 1000)
+            if key:
+                balancer.mark_error(key.id)
+                if upstream_started:
+                    _record_failed(key.id, model, prompt_tokens, completion_tokens,
+                                   latency_ms, str(e), current_provider)
+                    yield _make_sse_error(_friendly_error(e))
+                    _cleanup()
+                    return
+                _record_failed(key.id, model, 0, 0, latency_ms, str(e), current_provider)
+            _cleanup()
+            last_error = e
             continue
 
     if last_error:
@@ -495,10 +750,8 @@ def _extract_stream_usage(cfg, chunk_json: dict) -> tuple[int, int] | None:
             return int(u.get("prompt_tokens", 0)), int(u.get("completion_tokens", 0))
         return None
     if cfg.name == "anthropic":
-        # Anthropic: message_delta 事件的 usage 字段
         if chunk_json.get("type") == "message_delta":
             u = chunk_json.get("usage", {})
-            # message_delta 的 usage 仅含 output_tokens；input_tokens 在 message_start
             return None, int(u.get("output_tokens", 0))
         if chunk_json.get("type") == "message_start":
             msg = chunk_json.get("message", {})
