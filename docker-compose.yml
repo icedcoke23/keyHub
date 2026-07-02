@@ -4,17 +4,20 @@ services:
     container_name: keyhub
     restart: unless-stopped
     ports:
+      # 默认绑定 127.0.0.1，如需外网访问改为 "8000:8000" 并配置反向代理 HTTPS
       - "127.0.0.1:8000:8000"
     volumes:
       - keyhub-data:/app/data
       - ./.env:/app/.env:ro
     environment:
       - KEYHUB_ENV=production
-      # 生产环境强烈建议通过环境变量注入主密码而非写入 .env
-      # - KEYHUB_MASTER_PASSWORD=your-strong-password
-      # - KEYHUB_SECRET_KEY=your-secret-key
+      # ⚠️ 生产环境必须设置 KEYHUB_SECRET_KEY（通过环境变量注入，不要写入 .env）
+      # 生成方式: python -c "import secrets; print(secrets.token_urlsafe(48))"
+      # - KEYHUB_SECRET_KEY=your-secret-key-here
+      # 首次初始化也可以通过环境变量设置主密码（不推荐长期保留）
+      # - KEYHUB_MASTER_PASSWORD=your-strong-master-password
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/system/healthz', timeout=3)"]
       interval: 30s
       timeout: 5s
       retries: 3
