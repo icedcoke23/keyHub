@@ -1,13 +1,17 @@
 """备份导出/导入。
 
-格式：.khbak 文件 = 版本头 + Argon2 参数 + AES-256-GCM 加密的 JSON payload。
+两种备份格式：
 
-- 导出密码独立于主密码，便于把备份交给不同保管人
-- 备份内容含所有凭证（含明文）+ LLM key 扩展，不含 API Token（避免明文 token 落盘）
-- 导入时凭证按 name 去重：同名则跳过（除非 --overwrite）
+1. JSON 备份（.khbak）：版本头 + Argon2 参数 + AES-256-GCM 加密的 JSON payload。
+   - 导出密码独立于主密码，便于把备份交给不同保管人
+   - 备份内容含所有凭证（含明文）+ LLM key 扩展，不含 API Token（避免明文 token 落盘）
+   - 导入时凭证按 name 去重：同名则跳过（除非 --overwrite）
+   - 文件结构（二进制，大端）：
+     magic(4) "KHBP" | version(1) | argon2_params_len(4) | argon2_params_json | nonce(12) | ciphertext
 
-文件结构（二进制，大端）：
-  magic(4) "KHBP" | version(1) | argon2_params_len(4) | argon2_params_json | nonce(12) | ciphertext
+2. 全库加密备份（KHBK01）：直接备份整个 SQLite 数据库文件，AES-GCM 加密。
+   - magic=b"KHBK01" || salt(16) || nonce(12) || ciphertext(zlib压缩的SQLite数据)
+   - 密钥派生：Argon2id(password, salt, time_cost=3, memory_cost=65536) -> 32字节
 """
 
 from __future__ import annotations
@@ -15,23 +19,37 @@ from __future__ import annotations
 import json
 import os
 import struct
+import zlib
 from datetime import datetime
+from pathlib import Path
 from typing import Any
+
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM as AESGCM_cryptography
+from argon2.low_level import hash_secret_raw, Type
 
 from sqlalchemy import select
 
 from .crypto import (
     AESGCM,
     Argon2Params,
+    SALT_LEN,
+    NONCE_LEN,
+    MASTER_KEY_LEN,
     derive_master_key,
     new_argon2_params,
 )
-from .db import session_scope
+from .config import get_settings
+from .db import session_scope, get_engine
 from .models import Credential, LLMKey
 from .runtime import get_runtime
 
 _MAGIC = b"KHBP"
 _VERSION = 1
+
+_FULL_BACKUP_MAGIC = b"KHBK01"
+_FULL_BACKUP_TIME_COST = 3
+_FULL_BACKUP_MEMORY_COST = 65536
+_FULL_BACKUP_PARALLELISM = 4
 
 
 def export_backup(output_path: str, backup_password: str) -> dict[str, Any]:
@@ -192,3 +210,117 @@ def import_backup(input_path: str, backup_password: str, *, overwrite: bool = Fa
         "overwritten": overwritten,
         "total_in_backup": payload.get("count", 0),
     }
+
+
+def _derive_full_backup_key(password: str, salt: bytes) -> bytes:
+    """Argon2id 密钥派生：32 字节密钥。"""
+    return hash_secret_raw(
+        secret=password.encode("utf-8"),
+        salt=salt,
+        time_cost=_FULL_BACKUP_TIME_COST,
+        memory_cost=_FULL_BACKUP_MEMORY_COST,
+        parallelism=_FULL_BACKUP_PARALLELISM,
+        hash_len=MASTER_KEY_LEN,
+        type=Type.ID,
+    )
+
+
+def export_encrypted_backup(password: str) -> bytes:
+    """导出整个数据库为加密的二进制格式。
+
+    格式：magic=b"KHBK01" || salt(16) || nonce(12) || ciphertext(zlib压缩的SQLite数据)
+    """
+    rt = get_runtime()
+    if not rt.unlocked:
+        raise RuntimeError("KeyHub must be unlocked to export")
+
+    settings = get_settings()
+    db_path = Path(settings.db_path).resolve()
+
+    engine = get_engine()
+    engine.dispose()
+
+    with open(db_path, "rb") as f:
+        db_data = f.read()
+
+    compressed = zlib.compress(db_data, level=6)
+
+    salt = os.urandom(SALT_LEN)
+    key = _derive_full_backup_key(password, salt)
+    aes = AESGCM_cryptography(key)
+    nonce = os.urandom(NONCE_LEN)
+    ciphertext = aes.encrypt(nonce, compressed, associated_data=None)
+
+    result = _FULL_BACKUP_MAGIC + salt + nonce + ciphertext
+
+    from .audit import record as audit_record
+    from .models import AuditAction
+    audit_record(AuditAction.backup_export, "master",
+                 detail={"type": "full_encrypted", "size": len(result)})
+
+    return result
+
+
+def import_encrypted_backup(data: bytes, password: str) -> int:
+    """从加密备份恢复，返回恢复的凭证数。"""
+    rt = get_runtime()
+    if not rt.unlocked:
+        raise RuntimeError("KeyHub must be unlocked to import")
+
+    if len(data) < len(_FULL_BACKUP_MAGIC) + SALT_LEN + NONCE_LEN + 16:
+        raise ValueError("invalid encrypted backup: too short")
+
+    magic = data[:len(_FULL_BACKUP_MAGIC)]
+    if magic != _FULL_BACKUP_MAGIC:
+        raise ValueError("not a KeyHub encrypted full backup (bad magic)")
+
+    offset = len(_FULL_BACKUP_MAGIC)
+    salt = data[offset:offset + SALT_LEN]
+    offset += SALT_LEN
+    nonce = data[offset:offset + NONCE_LEN]
+    offset += NONCE_LEN
+    ciphertext = data[offset:]
+
+    key = _derive_full_backup_key(password, salt)
+    aes = AESGCM_cryptography(key)
+    try:
+        compressed = aes.decrypt(nonce, ciphertext, associated_data=None)
+    except Exception:
+        raise ValueError("wrong backup password or corrupted file")
+
+    try:
+        db_data = zlib.decompress(compressed)
+    except Exception:
+        raise ValueError("corrupted backup data (decompression failed)")
+
+    settings = get_settings()
+    db_path = Path(settings.db_path).resolve()
+
+    engine = get_engine()
+    engine.dispose()
+
+    backup_path = db_path.with_suffix(".db.bak")
+    if db_path.exists():
+        import shutil
+        shutil.copy2(db_path, backup_path)
+
+    with open(db_path, "wb") as f:
+        f.write(db_data)
+
+    import sys as _sys
+    db_module = _sys.modules["keyhub.db"]
+    db_module._engine = None
+    db_module._SessionLocal = None
+
+    with session_scope() as s:
+        count = s.execute(
+            select(Credential).where(Credential.deleted == False)  # noqa: E712
+        ).scalars().all()
+        cred_count = len(count)
+
+    from .audit import record as audit_record
+    from .models import AuditAction
+    audit_record(AuditAction.backup_import, "master",
+                 detail={"type": "full_encrypted", "credentials_count": cred_count})
+
+    return cred_count

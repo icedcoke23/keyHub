@@ -3,17 +3,23 @@
 from __future__ import annotations
 
 import json
+import time
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
+
 from sqlalchemy import select
 
 from ..audit import record as audit_record
 from ..auth import require_auth, require_scope
+from ..config import get_settings
+from ..db import session_scope
 from ..llm.balancer import get_balancer
-from ..llm.proxy import LLMProxyError, chat, chat_stream
+from ..llm.providers import get_provider
+from ..llm.proxy import LLMProxyError, _decrypt_key, chat, chat_stream
 from ..llm.tracker import aggregate_cost, list_llm_keys, list_usage
-from ..models import AuditAction, LLMKeyStatus
+from ..models import AuditAction, Credential, LLMKey, LLMKeyStatus
 from ..schemas import LLMChatRequest, LLMKeySummary, MessageOut, UsageOut
 
 router = APIRouter(prefix="/api/llm", tags=["llm"])
@@ -100,63 +106,138 @@ def cost(provider: str | None = Query(None), _: str = Depends(require_scope("llm
 
 @router.get("/cost/trend")
 def cost_trend(
-    days: int = Query(30, le=365),
-    _: str = Depends(require_scope("llm:read")),
-):
-    """按天聚合成本趋势，用于 UI 折线图。"""
-    from datetime import datetime, timedelta
-    from sqlalchemy import func, cast, Date
-    from ..db import session_scope
-    from ..models import UsageLog, LLMKey
-
-    cutoff = datetime.utcnow() - timedelta(days=days)
-    with session_scope() as s:
-        rows = s.execute(
-            select(
-                cast(UsageLog.created_at, Date).label("day"),
-                LLMKey.provider,
-                func.sum(UsageLog.cost_usd).label("cost"),
-                func.count(UsageLog.id).label("calls"),
-            )
-            .join(LLMKey, UsageLog.llm_key_id == LLMKey.id)
-            .where(UsageLog.created_at >= cutoff)
-            .group_by("day", LLMKey.provider)
-            .order_by("day")
-        ).all()
-        return [
-            {
-                "date": str(r.day),
-                "provider": r.provider,
-                "cost_usd": round(r.cost or 0, 6),
-                "calls": int(r.calls or 0),
-            }
-            for r in rows
-        ]
-
-
-@router.get("/latency")
-def latency_stats(
+    days: int = Query(7, ge=1, le=90),
     provider: str | None = Query(None),
     _: str = Depends(require_scope("llm:read")),
 ):
-    """返回各 provider 的 P50/P95/P99 延迟分位数。"""
+    """按天聚合成本趋势。"""
+    from datetime import datetime, timedelta
+    from sqlalchemy import func, cast, Date
+    from ..db import session_scope
+    from ..models import UsageLog
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    with session_scope() as s:
+        stmt = (
+            select(
+                cast(UsageLog.created_at, Date).label("day"),
+                func.sum(UsageLog.cost_usd).label("cost"),
+                func.count(UsageLog.id).label("calls"),
+            )
+            .where(UsageLog.created_at >= cutoff)
+            .group_by("day")
+            .order_by("day")
+        )
+        if provider:
+            stmt = stmt.join(LLMKey, UsageLog.llm_key_id == LLMKey.id).where(LLMKey.provider == provider)
+        rows = s.execute(stmt).all()
+    return [
+        {"date": str(r.day), "cost": round(r.cost or 0, 6), "calls": int(r.calls or 0)}
+        for r in rows
+    ]
+
+
+@router.get("/latency")
+def latency_stats(_: str = Depends(require_scope("llm:read"))):
+    """返回各 provider 的延迟分位数（P50/P95/P99）。"""
     from ..llm.latency_stats import get_latency_stats
-    stats = get_latency_stats()
-    if provider:
-        return {provider: stats.percentiles(provider)}
-    return stats.all_percentiles()
-
-
-@router.post("/cache/clear")
-def clear_cache(_: str = Depends(require_scope("admin:write"))):
-    """清空 LLM 响应缓存。"""
-    from ..llm.cache import get_cache
-    n = get_cache().clear()
-    return {"message": f"cleared {n} cache entries"}
+    return get_latency_stats().all_providers()
 
 
 @router.get("/cache/stats")
 def cache_stats(_: str = Depends(require_scope("llm:read"))):
-    """返回缓存统计。"""
+    """响应缓存统计。"""
     from ..llm.cache import get_cache
     return get_cache().stats()
+
+
+@router.post("/cache/clear", response_model=MessageOut)
+def cache_clear(_: str = Depends(require_scope("llm:write"))):
+    """清空响应缓存。"""
+    from ..llm.cache import get_cache
+    n = get_cache().clear()
+    return MessageOut(message=f"cleared {n} cache entries")
+
+
+@router.post("/keys/{key_id}/test")
+def test_key(
+    key_id: str,
+    _: str = Depends(require_scope("llm:read")),
+):
+    """测试指定 Key 的连通性：解密后请求上游 models 端点，测量延迟。"""
+    settings = get_settings()
+    balancer = get_balancer()
+
+    with session_scope() as s:
+        row = s.execute(
+            select(LLMKey, Credential.encrypted_value, Credential.name)
+            .join(Credential, LLMKey.credential_id == Credential.id)
+            .where(LLMKey.id == key_id)
+        ).one_or_none()
+        if row is None:
+            raise HTTPException(404, "key not found")
+        llm_key, enc_value, cred_name = row
+        provider_name = llm_key.provider
+        s.expunge(llm_key)
+
+    cfg = get_provider(provider_name)
+    if not cfg.base_url:
+        return {"success": False, "latency_ms": 0, "error": f"provider '{provider_name}' has no base_url configured", "models": None}
+
+    api_key = _decrypt_key(llm_key.id, enc_value, cred_name or key_id)
+
+    headers = {"Content-Type": "application/json"}
+    if cfg.header_name:
+        headers[cfg.header_name] = f"{cfg.header_prefix}{api_key}"
+    if cfg.name == "anthropic":
+        headers["anthropic-version"] = "2023-06-01"
+
+    if cfg.openai_compatible:
+        test_url = cfg.base_url.rstrip("/") + "/v1/models"
+    else:
+        test_url = cfg.base_url.rstrip("/") + "/v1/models"
+
+    t0 = time.monotonic()
+    latency_ms = 0
+    models: list | None = None
+    error_msg: str | None = None
+    success = False
+
+    try:
+        timeout = httpx.Timeout(
+            connect=settings.llm_connect_timeout,
+            read=settings.llm_read_timeout,
+            write=settings.llm_connect_timeout,
+            pool=settings.llm_connect_timeout,
+        )
+        with httpx.Client(timeout=timeout) as client:
+            r = client.get(test_url, headers=headers)
+        latency_ms = int((time.monotonic() - t0) * 1000)
+
+        if r.status_code >= 400:
+            error_msg = f"upstream {r.status_code}: {r.text[:200]}"
+        else:
+            try:
+                resp_json = r.json()
+                if cfg.openai_compatible:
+                    data = resp_json.get("data", [])
+                    models = [m.get("id", str(m)) if isinstance(m, dict) else str(m) for m in data]
+                else:
+                    models = []
+            except Exception:
+                models = []
+            success = True
+    except (httpx.RequestError, ValueError) as e:
+        latency_ms = int((time.monotonic() - t0) * 1000)
+        error_msg = str(e)
+
+    if success:
+        balancer.mark_ok(key_id, latency_ms)
+    else:
+        balancer.mark_error(key_id)
+
+    return {
+        "success": success,
+        "latency_ms": latency_ms,
+        "error": error_msg,
+        "models": models,
+    }

@@ -17,9 +17,9 @@ class CredentialCreate(BaseModel):
     type: CredentialType = CredentialType.password
     value: str = Field(..., min_length=1)  # 明文，仅用于加密入库
     metadata: dict[str, Any] = Field(default_factory=dict)
-    tags: list[str] = Field(default_factory=list)
     expires_at: datetime | None = None
     rotation_days: int | None = None
+    tags: list[str] = Field(default_factory=list)
     # LLM 扩展
     provider: str | None = None
     label: str | None = None
@@ -32,10 +32,10 @@ class CredentialCreate(BaseModel):
 class CredentialUpdate(BaseModel):
     value: str | None = None
     metadata: dict[str, Any] | None = None
-    tags: list[str] | None = None
     expires_at: datetime | None = None
     rotation_days: int | None = None
     rotation_note: str | None = None
+    tags: list[str] | None = None
 
 
 class CredentialOut(BaseModel):
@@ -43,12 +43,12 @@ class CredentialOut(BaseModel):
     name: str
     type: CredentialType
     metadata: dict[str, Any]
-    tags: list[str] = Field(default_factory=list)
     expires_at: datetime | None
     rotation_days: int | None
     created_at: datetime
     updated_at: datetime
     last_rotated_at: datetime | None
+    tags: list[str] = Field(default_factory=list)
     # LLM 扩展（若存在）
     provider: str | None = None
     label: str | None = None
@@ -96,11 +96,11 @@ class LLMKeySummary(BaseModel):
     status: LLMKeyStatus
     priority: int
     weight: int = 1
-    monthly_budget_usd: float = 0.0
     total_requests: int
     total_prompt_tokens: int
     total_completion_tokens: int
     estimated_cost_usd: float
+    monthly_budget_usd: float = 0.0
     avg_latency_ms: int = 0
     cooldown_until: datetime | None
     last_rotated_at: datetime | None
@@ -165,3 +165,11 @@ class RotationReminder(BaseModel):
     last_rotated_at: datetime | None
     days_until_expire: int | None
     days_since_rotation: int | None
+
+
+class RotationLogOut(BaseModel):
+    id: str
+    credential_id: str
+    rotated_at: datetime
+    note: str | None
+    old_fingerprint: str | None

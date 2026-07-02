@@ -88,7 +88,8 @@ class Runtime:
                 s.add(KVStore(key=_KV_ARGON2_PARAMS, value=json.dumps(params.to_dict())))
                 s.add(KVStore(key=_KV_MASTER_PW_HASH, value=pw_hash))
                 s.add(KVStore(key=_KV_INITIALIZED, value="1"))
-            self._vault = CryptoVault(params, master_key)
+            pepper = settings.ensure_secret_key()
+            self._vault = CryptoVault(params, master_key, pepper=pepper)
             self._initialized = True
         except Exception:
             # 清零派生密钥
@@ -111,7 +112,8 @@ class Runtime:
             return False
         params = Argon2Params.from_dict(json.loads(params_row.value))
         master_key = derive_master_key(master_password, params)
-        self._vault = CryptoVault(params, master_key)
+        pepper = get_settings().ensure_secret_key()
+        self._vault = CryptoVault(params, master_key, pepper=pepper)
         return True
 
     # ===== 锁定 / 退出 =====
@@ -171,7 +173,8 @@ class Runtime:
             parallelism=settings.argon2_parallelism,
         )
         new_master_key = derive_master_key(new_password, new_params)
-        new_vault = CryptoVault(new_params, new_master_key)
+        pepper = settings.ensure_secret_key()
+        new_vault = CryptoVault(new_params, new_master_key, pepper=pepper)
         new_pw_hash = hash_master_password(new_password)
 
         # 3. 单事务：重新加密所有未删除凭证 + 更新 KVStore（原子提交）
@@ -184,8 +187,15 @@ class Runtime:
                         select(Credential).where(Credential.deleted == False)  # noqa: E712
                     ).scalars().all()
                     for c in creds:
-                        plaintext = old_vault.decrypt(c.encrypted_value)
-                        c.encrypted_value = new_vault.encrypt(plaintext)
+                        aad = f"{c.id}:{c.name}".encode("utf-8")
+                        try:
+                            plaintext = old_vault.decrypt(c.encrypted_value, aad=aad)
+                        except Exception:
+                            try:
+                                plaintext = old_vault.decrypt(c.encrypted_value, aad=None)
+                            except Exception:
+                                plaintext = old_vault.decrypt(c.encrypted_value)
+                        c.encrypted_value = new_vault.encrypt(plaintext, aad=aad)
                         reencrypted += 1
                 # 同一事务内更新 KVStore，保证与重加密原子提交
                 params_row = s.execute(

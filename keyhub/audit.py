@@ -23,19 +23,38 @@ def record(
     detail: dict[str, Any] | None = None,
 ) -> None:
     """记录一条审计日志。失败不应抛异常（审计独立于业务）。"""
+    entry_id = None
     try:
         with session_scope() as s:
-            s.add(AuditLog(
+            log = AuditLog(
                 action=action,
                 actor=actor,
                 target=target,
                 success=success,
                 detail=detail or {},
                 created_at=datetime.utcnow(),
-            ))
+            )
+            s.add(log)
+            s.flush()
+            entry_id = log.id
     except Exception as e:  # noqa: BLE001
-        # 审计写入失败不应影响主流程，仅打印告警
         print(f"[audit] failed to record {action.value}: {e}", flush=True)
+        return
+
+    try:
+        from .api.events import get_broadcaster
+        event = {
+            "id": entry_id,
+            "action": action.value,
+            "actor": actor,
+            "target": target,
+            "success": success,
+            "detail": detail or {},
+            "created_at": datetime.utcnow().isoformat(),
+        }
+        get_broadcaster().broadcast(event)
+    except Exception as e:  # noqa: BLE001
+        print(f"[audit] failed to broadcast event: {e}", flush=True)
 
 
 def list_logs(
@@ -69,14 +88,18 @@ def list_logs(
 
 
 def cleanup_old_logs(retention_days: int) -> int:
-    """清理超过保留期的审计日志。返回删除的条数。"""
+    """清理超过保留天数的审计日志。返回删除条数。0 表示禁用。"""
     if retention_days <= 0:
         return 0
-    from datetime import timedelta
+    from datetime import datetime, timedelta
+    from sqlalchemy import delete, func
     cutoff = datetime.utcnow() - timedelta(days=retention_days)
-    from sqlalchemy import delete
-    with session_scope() as s:
-        result = s.execute(
-            delete(AuditLog).where(AuditLog.created_at < cutoff)
-        )
-        return result.rowcount or 0
+    try:
+        with session_scope() as s:
+            result = s.execute(
+                delete(AuditLog).where(AuditLog.created_at < cutoff)
+            )
+            return result.rowcount or 0
+    except Exception as e:
+        print(f"[audit] cleanup failed: {e}", flush=True)
+        return 0

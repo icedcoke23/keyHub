@@ -95,45 +95,44 @@ def get_limiter() -> LoginRateLimiter:
     return _limiter
 
 
-class TokenRateLimiter:
-    """按 API Token ID 的每分钟请求数限制。
+# ===== API Token 速率限制（滑动窗口 RPM）=====
 
-    滑动窗口实现，内存 dict + threading.Lock。
-    """
-    def __init__(self, rpm: int = 60):
-        self.rpm = rpm
-        self._windows: dict[str, list[float]] = {}
-        self._lock = threading.Lock()
+class TokenRateLimiter:
+    """按 token id 维度的每分钟请求数限制（滑动窗口）。"""
+    _instance = None
+    _lock = threading.Lock()
+
+    def __new__(cls):
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = super().__new__(cls)
+                cls._instance._requests = {}  # token_id -> list[float]
+            return cls._instance
 
     def check(self, token_id: str) -> tuple[bool, int]:
-        """检查是否允许请求。返回 (允许, 剩余配额)。"""
-        if self.rpm <= 0:
+        """检查并记录一次请求。返回 (是否允许, 剩余配额)。"""
+        from .config import get_settings
+        rpm = get_settings().token_rpm_limit
+        if rpm <= 0:
             return True, -1
         now = time.monotonic()
-        window_start = now - 60.0
+        window = 60.0
         with self._lock:
-            timestamps = self._windows.get(token_id, [])
-            # 清理过期时间戳
-            timestamps = [t for t in timestamps if t > window_start]
-            if len(timestamps) >= self.rpm:
-                self._windows[token_id] = timestamps
+            reqs = self._requests.get(token_id, [])
+            # 清理过期
+            reqs = [t for t in reqs if now - t < window]
+            if len(reqs) >= rpm:
+                self._requests[token_id] = reqs
                 return False, 0
-            timestamps.append(now)
-            self._windows[token_id] = timestamps
-            return True, self.rpm - len(timestamps)
+            reqs.append(now)
+            self._requests[token_id] = reqs
+            return True, rpm - len(reqs)
 
-    def reset(self, token_id: str | None = None):
-        with self._lock:
-            if token_id is None:
-                self._windows.clear()
-            else:
-                self._windows.pop(token_id, None)
 
 _token_limiter: TokenRateLimiter | None = None
 
 def get_token_limiter() -> TokenRateLimiter:
     global _token_limiter
     if _token_limiter is None:
-        from .config import get_settings
-        _token_limiter = TokenRateLimiter(rpm=get_settings().token_rpm_limit)
+        _token_limiter = TokenRateLimiter()
     return _token_limiter

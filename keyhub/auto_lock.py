@@ -1,14 +1,18 @@
-"""空闲自动锁定：超过配置时长无活动则自动锁定 vault。"""
+"""空闲自动锁定。
+
+后台 daemon 线程定期检查最后活动时间，超时则调用 runtime.lock()。
+"""
+from __future__ import annotations
+
 import threading
 import time
-from datetime import datetime
+
 from .config import get_settings
 from .runtime import get_runtime
-from .audit import record as audit_record
-from .models import AuditAction
+
 
 class AutoLockChecker:
-    """单例。后台 daemon 线程定期检查空闲时间。"""
+    """单例自动锁定检查器。"""
     _instance = None
     _lock = threading.Lock()
 
@@ -19,43 +23,45 @@ class AutoLockChecker:
                 cls._instance._last_activity = time.monotonic()
                 cls._instance._thread = None
                 cls._instance._running = False
-                cls._instance._activity_lock = threading.Lock()
             return cls._instance
 
     def touch(self):
-        """更新最后活动时间。每次 API 请求时应调用。"""
-        with self._activity_lock:
-            self._last_activity = time.monotonic()
+        """更新最后活动时间（认证成功时调用）。"""
+        self._last_activity = time.monotonic()
 
     def start(self):
-        settings = get_settings()
-        if settings.auto_lock_idle_seconds <= 0:
-            return
-        if self._running:
+        """启动后台检查线程。"""
+        if self._thread and self._thread.is_alive():
             return
         self._running = True
         self._thread = threading.Thread(target=self._loop, daemon=True, name="auto-lock")
         self._thread.start()
 
     def stop(self):
+        """停止后台检查线程。"""
         self._running = False
+        if self._thread:
+            self._thread.join(timeout=2)
 
     def _loop(self):
-        settings = get_settings()
-        interval = min(settings.auto_lock_idle_seconds, 60)  # 检查间隔不超过 60s
         while self._running:
-            time.sleep(interval)
-            if not self._running:
-                break
-            rt = get_runtime()
-            if not rt.unlocked:
-                continue
-            with self._activity_lock:
-                idle = time.monotonic() - self._last_activity
-            if idle >= settings.auto_lock_idle_seconds:
-                rt.lock()
-                audit_record(AuditAction.auth_auto_lock, "system",
-                             detail={"idle_seconds": int(idle)})
+            idle = get_settings().auto_lock_idle_seconds
+            if idle > 0:
+                elapsed = time.monotonic() - self._last_activity
+                if elapsed > idle:
+                    rt = get_runtime()
+                    if rt.unlocked:
+                        rt.lock()
+                        # 审计
+                        try:
+                            from .audit import record as audit_record
+                            from .models import AuditAction
+                            audit_record(AuditAction.auth_auto_lock, "system",
+                                         detail={"idle_seconds": int(elapsed)})
+                        except Exception:
+                            pass
+            time.sleep(10)  # 每 10 秒检查一次
+
 
 def get_auto_lock_checker() -> AutoLockChecker:
     return AutoLockChecker()

@@ -1,73 +1,82 @@
-"""Prometheus 指标收集。
+"""Prometheus 指标暴露。
 
-暴露 /metrics 端点，包含：
-- LLM 代理请求数/延迟/成本/错误率
-- 凭证操作计数
-- 认证事件计数
-- 缓存命中/未命中
+定义 KeyHub 自定义指标，并通过 /metrics 端点暴露（prometheus_client 默认格式）。
 """
 from __future__ import annotations
 
-from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST
-from fastapi import APIRouter, Response
+from fastapi import APIRouter, Depends
+from fastapi.responses import Response
+
+try:
+    from prometheus_client import (
+        Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST,
+    )
+    _HAS_PROM = True
+except ImportError:
+    _HAS_PROM = False
 
 router = APIRouter(tags=["metrics"])
 
-# LLM 代理指标
-llm_requests_total = Counter(
-    "keyhub_llm_requests_total",
-    "Total LLM proxy requests",
-    ["provider", "model", "status"],  # status: success/fail
-)
-llm_request_duration = Histogram(
-    "keyhub_llm_request_duration_seconds",
-    "LLM request duration in seconds",
-    ["provider", "model"],
-    buckets=[0.1, 0.5, 1, 2, 5, 10, 30, 60, 120],
-)
-llm_cost_usd = Counter(
-    "keyhub_llm_cost_usd_total",
-    "Total LLM cost in USD",
-    ["provider"],
-)
-llm_tokens_total = Counter(
-    "keyhub_llm_tokens_total",
-    "Total LLM tokens used",
-    ["provider", "type"],  # type: prompt/completion
-)
-llm_cache_hits = Counter(
-    "keyhub_llm_cache_hits_total",
-    "LLM response cache hits",
-)
-llm_cache_misses = Counter(
-    "keyhub_llm_cache_misses_total",
-    "LLM response cache misses",
-)
+if _HAS_PROM:
+    # LLM 请求总数（按 provider/model/status 标签）
+    llm_requests_total = Counter(
+        "keyhub_llm_requests_total",
+        "Total LLM proxy requests",
+        ["provider", "model", "status"],
+    )
+    # LLM 请求延迟（秒）
+    llm_request_duration = Histogram(
+        "keyhub_llm_request_duration_seconds",
+        "LLM request duration in seconds",
+        ["provider", "model"],
+        buckets=(0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0),
+    )
+    # LLM 累计成本（美元）
+    llm_cost_total = Counter(
+        "keyhub_llm_cost_usd_total",
+        "Total LLM cost in USD",
+        ["provider", "model"],
+    )
+    # LLM token 使用量
+    llm_tokens_total = Counter(
+        "keyhub_llm_tokens_total",
+        "Total LLM tokens used",
+        ["provider", "model", "kind"],
+    )
+    # 缓存命中/未命中
+    llm_cache_hits = Counter(
+        "keyhub_llm_cache_hits_total",
+        "LLM response cache hits",
+    )
+    llm_cache_misses = Counter(
+        "keyhub_llm_cache_misses_total",
+        "LLM response cache misses",
+    )
+    # 凭证数
+    credentials_total = Gauge(
+        "keyhub_credentials_total",
+        "Total credentials count",
+    )
+    # 活跃 LLM key 数
+    llm_keys_active = Gauge(
+        "keyhub_llm_keys_active",
+        "Active LLM keys count",
+    )
+    # 审计日志数
+    audit_logs_total = Gauge(
+        "keyhub_audit_logs_total",
+        "Total audit log entries",
+    )
+    # token 限流次数
+    token_rate_limited_total = Counter(
+        "keyhub_token_rate_limited_total",
+        "Token rate limited count",
+    )
 
-# 凭证指标
-credential_operations = Counter(
-    "keyhub_credential_operations_total",
-    "Credential operations",
-    ["action"],  # action: create/reveal/update/rotate/delete
-)
-
-# 认证指标
-auth_events = Counter(
-    "keyhub_auth_events_total",
-    "Authentication events",
-    ["event", "result"],  # event: unlock/lock/init; result: success/fail
-)
-
-# 系统指标
-active_llm_keys = Gauge(
-    "keyhub_active_llm_keys",
-    "Number of active LLM keys",
-)
-vault_status = Gauge(
-    "keyhub_vault_unlocked",
-    "Vault unlock status (1=unlocked, 0=locked)",
-)
 
 @router.get("/metrics")
 def metrics():
-    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+    """Prometheus 指标端点。"""
+    if not _HAS_PROM:
+        return Response(content="# prometheus_client not installed\n", media_type="text/plain")
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)

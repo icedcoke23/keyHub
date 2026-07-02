@@ -139,13 +139,12 @@ def require_auth(
                 status_code=403,
                 detail=f"token lacks required scope: {required_scope}",
             )
-        # 速率限制检查（按 token id 滑动窗口）
+        # 速率限制检查
         from .ratelimit import get_token_limiter
         from .models import AuditAction
         from .audit import record as audit_record
         allowed, remaining = get_token_limiter().check(row.id)
         if not allowed:
-            # 触发限流：记录审计日志并返回 429
             audit_record(
                 AuditAction.token_rate_limited,
                 f"token:{row.id}",
@@ -157,7 +156,6 @@ def require_auth(
                 detail="token rate limit exceeded",
                 headers={"Retry-After": "60"},
             )
-        # 认证成功：更新空闲活动时间
         from .auto_lock import get_auto_lock_checker
         get_auto_lock_checker().touch()
         return f"token:{row.id}"
@@ -165,7 +163,6 @@ def require_auth(
     # 2) Session cookie（浏览器登录，拥有全部权限）
     cookie = request.cookies.get(SESSION_COOKIE)
     if cookie and verify_session(cookie):
-        # 认证成功：更新空闲活动时间
         from .auto_lock import get_auto_lock_checker
         get_auto_lock_checker().touch()
         return "master"

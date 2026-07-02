@@ -2,26 +2,36 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+import csv
+import io
+from typing import Any
 
-from ..models import CredentialType
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import Response
+
+from ..models import AuditAction, CredentialType
 from ..schemas import (
     CredentialCreate,
     CredentialOut,
     CredentialSecret,
     CredentialUpdate,
     MessageOut,
+    RotationLogOut,
 )
 from ..store import (
     create_credential,
     delete_credential,
     get_credential,
+    get_credential_history,
     list_credentials,
     reveal_credential,
+    rollback_credential,
     rotate_credential,
     update_credential,
 )
 from ..auth import require_auth, require_scope
+from ..audit import record as audit_record
+from ..importers import import_bitwarden_json, import_keepass_csv
 
 router = APIRouter(prefix="/api/credentials", tags=["credentials"])
 
@@ -44,6 +54,145 @@ def list_all(
     return list_credentials(type_filter=type, q=q, tag=tag)
 
 
+@router.get("/utils/generate-password")
+def generate_password(
+    length: int = Query(20, ge=4, le=128),
+    upper: bool = Query(True),
+    lower: bool = Query(True),
+    digits: bool = Query(True),
+    symbols: bool = Query(True),
+    exclude_similar: bool = Query(True),
+    _: str = Depends(require_scope("credentials:read")),
+):
+    from ..crypto import generate_password as gen_pw, password_strength
+    pw = gen_pw(length=length, upper=upper, lower=lower, digits=digits,
+                symbols=symbols, exclude_similar=exclude_similar)
+    return {"password": pw, "strength": password_strength(pw)}
+
+
+@router.post("/import")
+def import_credentials(
+    body: dict[str, Any] | list[dict],
+    format: str = Query("json", description="导入格式: json, bitwarden, keepass_csv"),
+    actor: str = Depends(require_scope("credentials:write")),
+):
+    results = {"imported": 0, "skipped": 0, "errors": []}
+
+    if format == "json":
+        if not isinstance(body, list):
+            raise HTTPException(400, "json format expects a list of credential items")
+        items = body
+    elif format == "bitwarden":
+        if isinstance(body, dict) and "items" in body:
+            items_data = body["items"]
+        elif isinstance(body, list):
+            items_data = body
+        else:
+            raise HTTPException(400, "bitwarden format expects a list of items or {items: [...]}")
+        try:
+            creds_to_import = import_bitwarden_json(items_data)
+        except Exception as e:
+            raise HTTPException(400, f"failed to parse bitwarden data: {e}")
+        for data in creds_to_import:
+            try:
+                create_credential(data, actor=actor)
+                results["imported"] += 1
+            except ValueError as e:
+                if "already exists" in str(e):
+                    results["skipped"] += 1
+                else:
+                    results["errors"].append({"name": data.name, "error": str(e)})
+            except Exception as e:
+                results["errors"].append({"name": data.name, "error": str(e)})
+        audit_record(AuditAction.credential_import, actor, detail={**results, "format": format})
+        return results
+    elif format == "keepass_csv":
+        if not isinstance(body, dict) or "csv" not in body:
+            raise HTTPException(400, 'keepass_csv format expects {"csv": "..."} body')
+        csv_data = body["csv"]
+        try:
+            creds_to_import = import_keepass_csv(csv_data)
+        except Exception as e:
+            raise HTTPException(400, f"failed to parse CSV data: {e}")
+        for data in creds_to_import:
+            try:
+                create_credential(data, actor=actor)
+                results["imported"] += 1
+            except ValueError as e:
+                if "already exists" in str(e):
+                    results["skipped"] += 1
+                else:
+                    results["errors"].append({"name": data.name, "error": str(e)})
+            except Exception as e:
+                results["errors"].append({"name": data.name, "error": str(e)})
+        audit_record(AuditAction.credential_import, actor, detail={**results, "format": format})
+        return results
+    else:
+        raise HTTPException(400, f"unsupported format: {format}")
+
+    for item in items:
+        try:
+            data = CredentialCreate(**item)
+            create_credential(data, actor=actor)
+            results["imported"] += 1
+        except ValueError as e:
+            if "already exists" in str(e):
+                results["skipped"] += 1
+            else:
+                results["errors"].append({"name": item.get("name", "?"), "error": str(e)})
+        except Exception as e:
+            results["errors"].append({"name": item.get("name", "?"), "error": str(e)})
+    audit_record(AuditAction.credential_import, actor, detail={**results, "format": format})
+    return results
+
+
+@router.get("/export")
+def export_credentials(
+    format: str = Query("json", description="导出格式: json, csv"),
+    actor: str = Depends(require_scope("credentials:reveal")),
+):
+    all_creds = list_credentials()
+    secrets = []
+    for c in all_creds:
+        try:
+            secret = reveal_credential(c.name, actor=actor)
+            secrets.append(secret)
+        except Exception:
+            continue
+
+    if format == "json":
+        result = []
+        for s in secrets:
+            result.append({
+                "name": s.name,
+                "type": s.type.value,
+                "value": s.value,
+                "metadata": s.metadata,
+                "tags": s.tags,
+            })
+        audit_record(AuditAction.backup_export, actor, detail={"format": "json", "count": len(result)})
+        return result
+    elif format == "csv":
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["name", "type", "value", "username", "url", "tags", "notes"])
+        for s in secrets:
+            username = s.metadata.get("username", "") if s.metadata else ""
+            url = s.metadata.get("url", "") if s.metadata else ""
+            notes = s.metadata.get("notes", "") if s.metadata else ""
+            tags_str = ",".join(s.tags) if s.tags else ""
+            writer.writerow([s.name, s.type.value, s.value, username, url, tags_str, notes])
+        csv_content = output.getvalue()
+        audit_record(AuditAction.backup_export, actor, detail={"format": "csv", "count": len(secrets)})
+        return Response(
+            content=csv_content,
+            media_type="text/csv",
+            headers={"Content-Disposition": "attachment; filename=keyhub-export.csv"},
+        )
+    else:
+        raise HTTPException(400, f"unsupported format: {format}")
+
+
 @router.get("/{name}", response_model=CredentialOut)
 def get(name: str, _: str = Depends(require_scope("credentials:read"))):
     try:
@@ -54,11 +203,32 @@ def get(name: str, _: str = Depends(require_scope("credentials:read"))):
 
 @router.get("/{name}/reveal", response_model=CredentialSecret)
 def reveal(name: str, actor: str = Depends(require_scope("credentials:reveal"))):
-    """返回明文 —— 谨慎使用，会被记入审计日志。"""
     try:
         return reveal_credential(name, actor=actor)
     except KeyError:
         raise HTTPException(404, f"credential '{name}' not found")
+
+
+@router.get("/{name}/history", response_model=list[RotationLogOut])
+def history(name: str, _: str = Depends(require_scope("credentials:read"))):
+    try:
+        return get_credential_history(name)
+    except KeyError:
+        raise HTTPException(404, f"credential '{name}' not found")
+
+
+@router.post("/{name}/rollback", response_model=CredentialOut)
+def rollback(
+    name: str,
+    rotation_id: str = Query(..., description="要回滚到的轮换版本 ID"),
+    actor: str = Depends(require_scope("credentials:write")),
+):
+    try:
+        return rollback_credential(name, rotation_id, actor=actor)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 @router.patch("/{name}", response_model=CredentialOut)
@@ -91,38 +261,26 @@ def delete(name: str, actor: str = Depends(require_scope("credentials:write"))):
         raise HTTPException(404, f"credential '{name}' not found")
 
 
-# ===== 凭证健康检查 =====
-
 @router.get("/{name}/health")
-def health_check(
-    name: str,
-    _: str = Depends(require_scope("credentials:read")),
-):
-    """检查凭证强度、重复使用、泄露风险。"""
-    from ..store import reveal_credential, list_credentials
+def health_check(name: str, _: str = Depends(require_scope("credentials:read"))):
+    from ..store import reveal_credential as _reveal, list_credentials as _list
     from ..crypto import password_strength
-
     try:
-        secret = reveal_credential(name, actor="health-check")
+        secret = _reveal(name, actor="health-check")
     except KeyError:
         raise HTTPException(404, f"credential '{name}' not found")
-
-    # 强度评估
     strength = password_strength(secret.value)
-
-    # 重复检测：检查其他凭证是否有相同值
     duplicates = []
-    all_creds = list_credentials()
+    all_creds = _list()
     for c in all_creds:
         if c.name == name:
             continue
         try:
-            other = reveal_credential(c.name, actor="health-check")
+            other = _reveal(c.name, actor="health-check")
             if other.value == secret.value:
                 duplicates.append(c.name)
         except Exception:
             pass
-
     return {
         "name": name,
         "type": secret.type.value,
@@ -130,59 +288,3 @@ def health_check(
         "duplicates": duplicates,
         "has_duplicates": len(duplicates) > 0,
     }
-
-
-# ===== 密码生成器 =====
-
-@router.get("/utils/generate-password")
-def generate_password(
-    length: int = Query(20, ge=4, le=128),
-    upper: bool = Query(True),
-    lower: bool = Query(True),
-    digits: bool = Query(True),
-    symbols: bool = Query(True),
-    exclude_similar: bool = Query(True),
-    _: str = Depends(require_scope("credentials:read")),
-):
-    """生成密码学安全的随机密码。"""
-    from ..crypto import generate_password as gen_pw
-    pw = gen_pw(
-        length=length,
-        upper=upper,
-        lower=lower,
-        digits=digits,
-        symbols=symbols,
-        exclude_similar=exclude_similar,
-    )
-    from ..crypto import password_strength
-    return {"password": pw, "strength": password_strength(pw)}
-
-
-# ===== 批量导入 =====
-
-@router.post("/import")
-def import_credentials(
-    items: list[dict],
-    actor: str = Depends(require_scope("credentials:write")),
-):
-    """批量导入凭证（JSON 数组格式）。
-
-    每项需包含：name, type, value。可选：metadata, tags, provider, label, rotation_days。
-    """
-    from ..schemas import CredentialCreate
-    from ..store import create_credential
-
-    results = {"imported": 0, "skipped": 0, "errors": []}
-    for item in items:
-        try:
-            data = CredentialCreate(**item)
-            create_credential(data, actor=actor)
-            results["imported"] += 1
-        except ValueError as e:
-            if "already exists" in str(e):
-                results["skipped"] += 1
-            else:
-                results["errors"].append({"name": item.get("name", "?"), "error": str(e)})
-        except Exception as e:
-            results["errors"].append({"name": item.get("name", "?"), "error": str(e)})
-    return results

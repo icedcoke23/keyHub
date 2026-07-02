@@ -44,7 +44,7 @@ where = ["."]
 include = ["keyhub*"]
 
 [tool.setuptools.package-data]
-keyhub = ["web/templates/*.html", "web/static/*"]
+keyhub = ["web/templates/*.html", "web/static/*", "web/static/**/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

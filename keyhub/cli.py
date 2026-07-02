@@ -461,55 +461,33 @@ def backup_import(
     )
 
 
-# ===== 密码生成器 =====
-
 @app.command(name="gen-password")
 def gen_password(
-    length: int = typer.Option(20, "--length", "-l", help="密码长度"),
-    no_symbols: bool = typer.Option(False, "--no-symbols", help="不包含符号"),
-    no_digits: bool = typer.Option(False, "--no-digits", help="不包含数字"),
-    no_upper: bool = typer.Option(False, "--no-upper", help="不包含大写字母"),
-    exclude_similar: bool = typer.Option(True, "--include-similar/--exclude-similar", help="排除易混淆字符"),
+    length: int = typer.Option(20, "--length", help="密码长度"),
+    symbols: bool = typer.Option(True, "--symbols/--no-symbols"),
+    exclude_similar: bool = typer.Option(True, "--exclude-similar/--include-similar"),
 ):
-    """生成密码学安全的随机密码。"""
+    """生成强密码。"""
     from .crypto import generate_password, password_strength
-    pw = generate_password(
-        length=length,
-        upper=not no_upper,
-        digits=not no_digits,
-        symbols=not no_symbols,
-        exclude_similar=exclude_similar,
-    )
-    strength = password_strength(pw)
-    colors = {0: "red", 1: "red", 2: "yellow", 3: "green", 4: "green"}
-    console.print(f"[bold]{pw}[/bold]")
-    console.print(f"强度: [{colors.get(strength['score'], 'white')}]{strength['label']}[/{colors.get(strength['score'], 'white')}] "
-                  f"(熵: {strength['entropy_bits']:.1f} bits)")
-    if strength["issues"]:
-        for issue in strength["issues"]:
-            console.print(f"  [yellow]⚠ {issue}[/yellow]")
+    pw = generate_password(length=length, symbols=symbols, exclude_similar=exclude_similar)
+    s = password_strength(pw)
+    console.print(f"[bold green]{pw}[/bold green]")
+    console.print(f"强度: {s['label']} (熵: {s['entropy_bits']} bits)")
 
-
-# ===== 凭证健康检查 =====
 
 @app.command(name="health-check")
-def health_check(
-    name: str = typer.Argument(..., help="凭证名称"),
-):
+def health_check(name: str = typer.Argument(..., help="凭证名称")):
     """检查凭证强度、重复使用情况。"""
     _ensure_unlocked()
     from .store import reveal_credential, list_credentials
     from .crypto import password_strength
-
     try:
         secret = reveal_credential(name, actor="health-check")
     except KeyError:
         console.print(f"[red]凭证 '{name}' 不存在[/red]")
         raise typer.Exit(1)
-
     strength = password_strength(secret.value)
     colors = {0: "red", 1: "red", 2: "yellow", 3: "green", 4: "green"}
-
     table = Table(show_header=False)
     table.add_column("k", style="cyan")
     table.add_column("v")
@@ -518,8 +496,7 @@ def health_check(
     table.add_row("强度", f"[{colors.get(strength['score'], 'white')}]{strength['label']}[/{colors.get(strength['score'], 'white')}]")
     table.add_row("熵(bits)", f"{strength['entropy_bits']:.1f}")
     if strength["issues"]:
-        table.add_row("问题", "\n".join(f"⚠ {i}" for i in strength["issues"]))
-
+        table.add_row("问题", "\n".join(strength["issues"]))
     # 重复检测
     duplicates = []
     all_creds = list_credentials()
@@ -536,11 +513,8 @@ def health_check(
         table.add_row("重复使用", "[red]" + ", ".join(duplicates) + "[/red]")
     else:
         table.add_row("重复使用", "[green]无[/green]")
-
     console.print(table)
 
-
-# ===== TOTP =====
 
 @app.command(name="totp-generate")
 def totp_generate(
@@ -556,6 +530,159 @@ def totp_generate(
     console.print(f"\n[dim]otpauth URI（可生成二维码）：[/dim]")
     console.print(f"[dim]{uri}[/dim]")
     console.print("\n[yellow]⚠ 此密钥仅显示一次，请立即保存到安全位置。[/yellow]")
+
+
+# ===== proxy =====
+
+alias_app = typer.Typer(help="模型别名管理")
+app.add_typer(alias_app, name="alias")
+
+
+@app.command()
+def proxy(
+    host: str = typer.Option("127.0.0.1", "--host", "-h", help="绑定地址"),
+    port: int = typer.Option(8080, "--port", "-p", help="监听端口"),
+    upstream: str = typer.Option("http://127.0.0.1:8000", "--upstream", "-u", help="KeyHub 服务地址"),
+    token: Optional[str] = typer.Option(None, "--token", "-t", help="API Token（默认从 KEYHUB_TOKEN 环境变量读取）"),
+):
+    """启动本地 HTTP 代理服务器（绑定 127.0.0.1:8080），将 OpenAI 格式请求转发到 KeyHub。"""
+    import uvicorn
+    from fastapi import FastAPI, Request
+    from fastapi.responses import JSONResponse, Response, StreamingResponse
+    import httpx
+
+    api_token = token or os.environ.get("KEYHUB_TOKEN")
+    if not api_token:
+        console.print("[yellow]警告: 未设置 API Token（使用 --token 或 KEYHUB_TOKEN 环境变量）[/yellow]")
+
+    proxy_fastapi = FastAPI()
+
+    @proxy_fastapi.api_route("/v1/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
+    async def proxy_v1(path: str, request: Request):
+        nonlocal api_token
+        url = f"{upstream.rstrip('/')}/v1/{path}"
+        headers = dict(request.headers)
+        if api_token:
+            headers["Authorization"] = f"Bearer {api_token}"
+        headers.pop("host", None)
+
+        body = await request.body()
+
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
+                is_stream = False
+                if path == "chat/completions":
+                    try:
+                        import json
+                        body_json = json.loads(body)
+                        is_stream = bool(body_json.get("stream", False))
+                    except Exception:
+                        pass
+
+                if is_stream:
+                    async def stream_generator():
+                        async with client.stream(
+                            method=request.method,
+                            url=url,
+                            headers=headers,
+                            content=body,
+                        ) as resp:
+                            async for chunk in resp.aiter_bytes():
+                                yield chunk
+                    return StreamingResponse(
+                        stream_generator(),
+                        media_type="text/event-stream",
+                        status_code=200,
+                    )
+
+                resp = await client.request(
+                    method=request.method,
+                    url=url,
+                    headers=headers,
+                    content=body,
+                )
+                return Response(
+                    content=resp.content,
+                    status_code=resp.status_code,
+                    headers=dict(resp.headers),
+                    media_type=resp.headers.get("content-type", "application/json"),
+                )
+        except httpx.ConnectError:
+            return JSONResponse(
+                status_code=503,
+                content={"error": {"message": f"无法连接到 KeyHub 服务: {upstream}", "type": "connection_error"}},
+            )
+        except Exception as e:
+            return JSONResponse(
+                status_code=500,
+                content={"error": {"message": str(e), "type": "proxy_error"}},
+            )
+
+    @proxy_fastapi.get("/healthz")
+    async def proxy_healthz():
+        return {"status": "ok", "proxy": "keyhub-proxy"}
+
+    console.print(f"[green]KeyHub 代理启动于 http://{host}:{port}[/green]")
+    console.print(f"[dim]上游: {upstream}[/dim]")
+    console.print(f"[dim]使用方式: OPENAI_BASE_URL=http://{host}:{port}/v1[/dim]")
+    uvicorn.run(proxy_fastapi, host=host, port=port, log_level="warning")
+
+
+# ===== alias =====
+
+@alias_app.command("add")
+def alias_add(
+    alias: str = typer.Argument(..., help="别名（如 gpt-4）"),
+    provider: str = typer.Option(..., "--provider", "-p", help="供应商（如 openai）"),
+    model: str = typer.Option(..., "--model", "-m", help="实际模型名（如 gpt-4-turbo）"),
+):
+    """添加模型别名。"""
+    _ensure_unlocked()
+    from .llm.aliases import get_alias_manager
+    mgr = get_alias_manager()
+    mgr.add_alias(alias, provider, model)
+    console.print(f"[green]已添加别名: {alias} -> {provider}/{model}[/green]")
+
+
+@alias_app.command("remove")
+def alias_remove(
+    alias: str = typer.Argument(..., help="要删除的别名"),
+):
+    """删除模型别名。"""
+    _ensure_unlocked()
+    from .llm.aliases import get_alias_manager
+    mgr = get_alias_manager()
+    if mgr.remove_alias(alias):
+        console.print(f"[green]已删除别名: {alias}[/green]")
+    else:
+        console.print(f"[yellow]别名 '{alias}' 不存在[/yellow]")
+
+
+@alias_app.command("list")
+def alias_list():
+    """列出所有模型别名。"""
+    _ensure_unlocked()
+    from .llm.aliases import get_alias_manager, PRESETS
+    mgr = get_alias_manager()
+    aliases = mgr.list_aliases()
+
+    table = Table(title="模型别名")
+    table.add_column("别名", style="cyan")
+    table.add_column("->", style="dim")
+    table.add_column("供应商", style="green")
+    table.add_column("模型", style="green")
+
+    for a, (p, m) in aliases.items():
+        table.add_row(a, "->", p, m)
+
+    if not aliases:
+        console.print("[dim]暂无自定义别名[/dim]")
+    else:
+        console.print(table)
+
+    console.print("\n[dim]预设别名:[/dim]")
+    for a, (p, m) in PRESETS.items():
+        console.print(f"  [dim]{a} -> {p}/{m}[/dim]")
 
 
 if __name__ == "__main__":

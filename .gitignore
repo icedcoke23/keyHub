@@ -46,10 +46,6 @@ data/
 secrets/
 master.key
 
-# Test coverage
-.coverage
-htmlcov/
-
 # Logs
 *.log
 logs/

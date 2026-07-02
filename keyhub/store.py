@@ -1,4 +1,4 @@
-"""凭证存储业务逻辑：CRUD、解密、轮换。"""
+"""凭证存储业务逻辑：CRUD、解密、轮换、版本历史。"""
 
 from __future__ import annotations
 
@@ -24,15 +24,20 @@ from .schemas import (
     CredentialOut,
     CredentialSecret,
     CredentialUpdate,
+    RotationLogOut,
 )
 
 
-def _encrypt(value: str) -> bytes:
-    return get_runtime().vault.encrypt(value)
+def _encrypt(value: str, aad: bytes | None = None) -> bytes:
+    return get_runtime().vault.encrypt(value, aad=aad)
 
 
-def _decrypt(blob: bytes) -> str:
-    return get_runtime().vault.decrypt(blob)
+def _decrypt(blob: bytes, aad: bytes | None = None) -> str:
+    return get_runtime().vault.decrypt(blob, aad=aad)
+
+
+def _make_aad(cred_id: str, name: str) -> bytes:
+    return f"{cred_id}:{name}".encode("utf-8")
 
 
 def _fingerprint(value: str) -> str:
@@ -45,12 +50,12 @@ def _to_out(c: Credential) -> CredentialOut:
         name=c.name,
         type=c.type,
         metadata=c.metadata_ or {},
-        tags=c.tags or [],
         expires_at=c.expires_at,
         rotation_days=c.rotation_days,
         created_at=c.created_at,
         updated_at=c.updated_at,
         last_rotated_at=c.last_rotated_at,
+        tags=c.tags or [],
     )
     if c.llm_key:
         out.provider = c.llm_key.provider
@@ -63,7 +68,17 @@ def _to_out(c: Credential) -> CredentialOut:
     return out
 
 
-# ===== 创建 =====
+def _try_decrypt(c: Credential) -> str:
+    """解密凭证值，自动尝试 v0（无AAD）和 v1（有AAD）格式。"""
+    aad = _make_aad(c.id, c.name)
+    try:
+        return _decrypt(c.encrypted_value, aad=aad)
+    except Exception:
+        try:
+            return _decrypt(c.encrypted_value, aad=None)
+        except Exception:
+            return _decrypt(c.encrypted_value)
+
 
 def create_credential(data: CredentialCreate, actor: str = "system") -> CredentialOut:
     with session_scope() as s:
@@ -76,13 +91,16 @@ def create_credential(data: CredentialCreate, actor: str = "system") -> Credenti
         cred = Credential(
             name=data.name,
             type=data.type,
-            encrypted_value=_encrypt(data.value),
+            encrypted_value=b"",
             metadata_=data.metadata,
-            tags=data.tags,
             expires_at=data.expires_at,
             rotation_days=data.rotation_days,
+            tags=data.tags or [],
         )
         s.add(cred)
+        s.flush()
+
+        cred.encrypted_value = _encrypt(data.value, aad=_make_aad(cred.id, cred.name))
 
         if data.type == CredentialType.llm:
             if not data.provider:
@@ -108,8 +126,6 @@ def create_credential(data: CredentialCreate, actor: str = "system") -> Credenti
     return out
 
 
-# ===== 列表 =====
-
 def list_credentials(
     type_filter: CredentialType | None = None,
     include_deleted: bool = False,
@@ -123,38 +139,34 @@ def list_credentials(
         if type_filter:
             stmt = stmt.where(Credential.type == type_filter)
         if q:
-            # 搜索 name 和 metadata 中的 JSON 文本
             stmt = stmt.where(Credential.name.contains(q))
         if tag:
-            # SQLite JSON 数组包含检查
             stmt = stmt.where(text("tags LIKE '%' || :tag || '%'").bindparams(tag=tag))
         stmt = stmt.order_by(Credential.name)
         rows = s.execute(stmt).scalars().all()
         return [_to_out(c) for c in rows]
 
 
-# ===== 详情（不含明文） =====
-
 def get_credential(name: str) -> CredentialOut:
     with session_scope() as s:
         c = s.execute(
             select(Credential).where(Credential.name == name)
+            .where(Credential.deleted == False)  # noqa: E712
         ).scalar_one_or_none()
         if c is None:
             raise KeyError(name)
         return _to_out(c)
 
 
-# ===== 取明文 =====
-
 def reveal_credential(name: str, actor: str = "system") -> CredentialSecret:
     with session_scope() as s:
         c = s.execute(
             select(Credential).where(Credential.name == name)
+            .where(Credential.deleted == False)  # noqa: E712
         ).scalar_one_or_none()
         if c is None:
             raise KeyError(name)
-        value = _decrypt(c.encrypted_value)
+        value = _try_decrypt(c)
         out = CredentialSecret(
             id=c.id,
             name=c.name,
@@ -163,13 +175,10 @@ def reveal_credential(name: str, actor: str = "system") -> CredentialSecret:
             metadata=c.metadata_ or {},
             tags=c.tags or [],
         )
-    # reveal 是最敏感的操作，必须审计；记录目标与类型，不记录明文
     audit_record(AuditAction.credential_reveal, actor, target=name,
                  detail={"type": out.type.value})
     return out
 
-
-# ===== 更新 / 轮换 =====
 
 def update_credential(name: str, data: CredentialUpdate, actor: str = "system") -> CredentialOut:
     with session_scope() as s:
@@ -180,30 +189,32 @@ def update_credential(name: str, data: CredentialUpdate, actor: str = "system") 
             raise KeyError(name)
 
         old_fp = None
+        old_encrypted = None
         rotated = False
         if data.value is not None:
-            # 轮换：记录旧值指纹 + 写入新值
             try:
-                old_value = _decrypt(c.encrypted_value)
+                old_value = _try_decrypt(c)
                 old_fp = _fingerprint(old_value)
             except Exception:
                 old_fp = None
-            c.encrypted_value = _encrypt(data.value)
+            old_encrypted = c.encrypted_value
+            c.encrypted_value = _encrypt(data.value, aad=_make_aad(c.id, c.name))
             c.last_rotated_at = datetime.utcnow()
             rotated = True
         if data.metadata is not None:
             c.metadata_ = data.metadata
-        if data.tags is not None:
-            c.tags = data.tags
         if data.expires_at is not None:
             c.expires_at = data.expires_at
         if data.rotation_days is not None:
             c.rotation_days = data.rotation_days
+        if data.tags is not None:
+            c.tags = data.tags
 
         if rotated:
             s.add(RotationLog(
                 credential=c,
                 old_fingerprint=old_fp,
+                encrypted_value=old_encrypted,
                 note=data.rotation_note or "manual rotation",
             ))
 
@@ -226,8 +237,6 @@ def rotate_credential(name: str, new_value: str, note: str | None = None,
     ), actor=actor)
 
 
-# ===== 删除（软删除） =====
-
 def delete_credential(name: str, actor: str = "system") -> None:
     with session_scope() as s:
         c = s.execute(
@@ -237,3 +246,90 @@ def delete_credential(name: str, actor: str = "system") -> None:
             raise KeyError(name)
         c.deleted = True
     audit_record(AuditAction.credential_delete, actor, target=name)
+
+
+def reveal_raw(cred_id: str, encrypted_value: bytes, cred_name: str) -> str:
+    """LLM 代理等内部调用：直接解密 LLM key 的明文。"""
+    aad = _make_aad(cred_id, cred_name)
+    try:
+        return _decrypt(encrypted_value, aad=aad)
+    except Exception:
+        try:
+            return _decrypt(encrypted_value, aad=None)
+        except Exception:
+            return _decrypt(encrypted_value)
+
+
+def get_credential_history(name: str) -> list[RotationLogOut]:
+    """返回某凭证的轮换历史列表（不含密文，仅元信息）。"""
+    with session_scope() as s:
+        c = s.execute(
+            select(Credential).where(Credential.name == name)
+        ).scalar_one_or_none()
+        if c is None:
+            raise KeyError(name)
+        logs = s.execute(
+            select(RotationLog)
+            .where(RotationLog.credential_id == c.id)
+            .order_by(RotationLog.rotated_at.desc())
+        ).scalars().all()
+        return [
+            RotationLogOut(
+                id=log.id,
+                credential_id=log.credential_id,
+                rotated_at=log.rotated_at,
+                note=log.note,
+                old_fingerprint=log.old_fingerprint,
+            )
+            for log in logs
+        ]
+
+
+def rollback_credential(name: str, rotation_id: str, actor: str = "system") -> CredentialOut:
+    """将凭证值回滚到指定轮换版本。"""
+    with session_scope() as s:
+        c = s.execute(
+            select(Credential).where(Credential.name == name)
+        ).scalar_one_or_none()
+        if c is None:
+            raise KeyError(name)
+
+        target_log = s.execute(
+            select(RotationLog)
+            .where(RotationLog.id == rotation_id)
+            .where(RotationLog.credential_id == c.id)
+        ).scalar_one_or_none()
+        if target_log is None:
+            raise KeyError(f"rotation log '{rotation_id}' not found")
+        if target_log.encrypted_value is None:
+            raise ValueError("cannot rollback: this version has no stored encrypted value")
+
+        current_fp = None
+        try:
+            current_value = _try_decrypt(c)
+            current_fp = _fingerprint(current_value)
+        except Exception:
+            current_fp = None
+
+        current_encrypted = c.encrypted_value
+        c.encrypted_value = target_log.encrypted_value
+        c.last_rotated_at = datetime.utcnow()
+
+        s.add(RotationLog(
+            credential=c,
+            old_fingerprint=current_fp,
+            encrypted_value=current_encrypted,
+            note=f"rollback to rotation {rotation_id}",
+        ))
+
+        s.flush()
+        s.refresh(c)
+        out = _to_out(c)
+
+    audit_record(
+        AuditAction.credential_rollback,
+        actor,
+        target=name,
+        detail={"rotation_id": rotation_id, "old_fingerprint": current_fp},
+    )
+    return out

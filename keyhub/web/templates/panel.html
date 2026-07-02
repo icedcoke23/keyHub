@@ -3,7 +3,11 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#07090d">
   <title>{{ title }}</title>
+  <link rel="manifest" href="/static/manifest.json">
+  <link rel="icon" type="image/svg+xml" href="/static/icon.svg">
+  <link rel="apple-touch-icon" href="/static/icon.svg">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="stylesheet" href="/static/style.css">
 </head>
@@ -72,7 +76,7 @@
         </div>
         <div><label>轮换周期(天)</label><input id="c-rot" type="number" placeholder="90"></div>
       </div>
-      <div style="margin-top:12px;display:flex;gap:8px;align-items:flex-end">
+      <div class="row" style="margin-top:12px">
         <div style="flex:1"><label>明文值</label><input id="c-value" type="password" placeholder="sk-..."></div>
         <div class="nogrow"><button class="secondary small" onclick="genPassword()">生成</button></div>
       </div>
@@ -86,8 +90,8 @@
 
       <h2 style="margin-top:28px">凭证列表</h2>
       <div class="row" style="margin-bottom:14px">
-        <div><input id="c-search" placeholder="搜索凭证名..."></div>
-        <div><input id="c-tag-filter" placeholder="标签过滤..."></div>
+        <div><input id="c-search" placeholder="搜索凭证名..." oninput="loadCreds()"></div>
+        <div><input id="c-tag-filter" placeholder="标签过滤..." oninput="loadCreds()"></div>
       </div>
       <table>
         <thead><tr><th>名称</th><th>类型</th><th>供应商/标签</th><th>状态</th><th>到期</th><th>标签</th><th>操作</th></tr></thead>
@@ -104,25 +108,28 @@
         <tbody id="llm-keys"></tbody>
       </table>
 
-      <h2 style="margin-top:28px">代理调用测试</h2>
-      <div class="row">
-        <div><label>供应商</label><input id="l-provider" value="openai" autocomplete="off"></div>
-        <div><label>模型</label><input id="l-model" value="gpt-4o-mini" autocomplete="off" placeholder="gpt-4o-mini"></div>
-        <div class="nogrow" style="padding-bottom:0">
-          <label style="visibility:hidden">流式</label>
-          <label style="display:flex;gap:6px;align-items:center;text-transform:none;letter-spacing:0;font-size:13px;color:var(--text-2);cursor:pointer">
-            <input type="checkbox" id="l-stream" style="width:auto"><span>流式</span>
-          </label>
+      <h2 style="margin-top:28px">Playground</h2>
+      <div class="playground">
+        <div class="chat-toolbar">
+          <select id="chat-model" class="chat-model-select">
+            <option value="">加载模型中...</option>
+          </select>
+          <button class="ghost small" id="chat-clear-btn" onclick="clearChat()">清空对话</button>
         </div>
-      </div>
-      <div style="margin-top:12px"><label>消息</label><textarea id="l-input" rows="3" placeholder="说点什么...">Hello</textarea></div>
-      <div style="margin-top:12px;display:flex;gap:8px">
-        <button id="llm-send-btn" onclick="llmChat()">调用</button>
-        <button class="ghost" id="llm-stop-btn" onclick="stopChat()" disabled>停止</button>
-      </div>
-      <div id="llm-err" class="error"></div>
-      <div style="margin-top:12px"><label>响应</label>
-        <div class="chat-stream" id="llm-out"></div>
+        <div class="chat-messages" id="chat-messages">
+          <div class="chat-welcome">
+            <div class="chat-welcome-icon">💬</div>
+            <div class="chat-welcome-text">选择模型，开始对话</div>
+          </div>
+        </div>
+        <div class="chat-input-area">
+          <textarea id="chat-input" class="chat-input" rows="1" placeholder="输入消息... (Shift+Enter 换行，Enter 发送)"></textarea>
+          <div class="chat-input-actions">
+            <button class="ghost small" id="chat-stop-btn" onclick="stopChatPlayground()" disabled>停止</button>
+            <button id="chat-send-btn" onclick="sendChatMessage()">发送</button>
+          </div>
+        </div>
+        <div id="chat-err" class="error" style="margin-top:8px;display:none"></div>
       </div>
     </div>
 
