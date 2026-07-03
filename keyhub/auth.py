@@ -14,12 +14,18 @@ from sqlalchemy import select
 
 from .config import get_settings
 from .db import session_scope
-from .models import APIToken
+from .models import APIToken, KVStore
 from .runtime import get_runtime
 
 # Session Cookie 名称
 SESSION_COOKIE = "keyhub_session"
 SESSION_MAX_AGE = 7 * 24 * 3600  # 7 天
+
+# KVStore 中的会话纪元键。lock() / change_master_password() 时递增，
+# verify_session 校验 cookie 中的 epoch 与当前值一致，实现服务端撤销：
+# - 锁定后所有已签发 session 立即失效
+# - 改密后所有旧 session 立即失效
+_KV_SESSION_EPOCH = "session_epoch"
 
 _bearer = HTTPBearer(auto_error=False)
 
@@ -29,19 +35,57 @@ def _serializer() -> URLSafeTimedSerializer:
     return URLSafeTimedSerializer(settings.ensure_secret_key(), salt="keyhub-session")
 
 
+def get_session_epoch() -> int:
+    """读取当前会话纪元。"""
+    with session_scope() as s:
+        row = s.execute(
+            select(KVStore).where(KVStore.key == _KV_SESSION_EPOCH)
+        ).scalar_one_or_none()
+        if row is None:
+            return 0
+        try:
+            return int(row.value)
+        except (ValueError, TypeError):
+            return 0
+
+
+def bump_session_epoch() -> int:
+    """递增会话纪元，使所有已签发 session 失效。返回新纪元值。"""
+    with session_scope() as s:
+        row = s.execute(
+            select(KVStore).where(KVStore.key == _KV_SESSION_EPOCH)
+        ).scalar_one_or_none()
+        if row is None:
+            new_val = 1
+            s.add(KVStore(key=_KV_SESSION_EPOCH, value=str(new_val)))
+        else:
+            try:
+                new_val = int(row.value) + 1
+            except (ValueError, TypeError):
+                new_val = 1
+            row.value = str(new_val)
+        return new_val
+
+
 # ===== Session =====
 
 def create_session(subject: str) -> str:
-    """subject 通常为 'master'。"""
-    return _serializer().dumps({"sub": subject})
+    """subject 通常为 'master'。session 携带当前纪元，用于服务端撤销。"""
+    epoch = get_session_epoch()
+    return _serializer().dumps({"sub": subject, "ep": epoch})
 
 
 def verify_session(token: str) -> bool:
+    """校验 session 签名 + max_age + 纪元（服务端撤销）。"""
     try:
-        _serializer().loads(token, max_age=SESSION_MAX_AGE)
-        return True
+        payload = _serializer().loads(token, max_age=SESSION_MAX_AGE)
     except BadSignature:
         return False
+    # 校验纪元：lock()/change_password() 会递增纪元，使旧 session 失效
+    cookie_epoch = payload.get("ep", -1)
+    if cookie_epoch != get_session_epoch():
+        return False
+    return True
 
 
 # ===== API Token =====

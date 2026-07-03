@@ -179,6 +179,12 @@ class Runtime:
             if self._vault is not None:
                 self._vault.zero()
                 self._vault = None
+        # 递增会话纪元，使所有已签发 session 立即失效（服务端撤销）
+        try:
+            from .auth import bump_session_epoch
+            bump_session_epoch()
+        except Exception:
+            pass
 
     # ===== 主密码变更 =====
 
@@ -293,6 +299,12 @@ class Runtime:
             # 4. 事务提交成功后替换运行时 vault（已在写锁内）
             old_vault.zero()
             self._vault = new_vault
+        # 改密成功后递增会话纪元，使所有旧 session 失效（强制重新登录）
+        try:
+            from .auth import bump_session_epoch
+            bump_session_epoch()
+        except Exception:
+            pass
         return reencrypted
 
     @property
