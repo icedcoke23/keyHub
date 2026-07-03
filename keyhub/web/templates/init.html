@@ -3,27 +3,35 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#030712">
   <title>{{ title }}</title>
+  <link rel="manifest" href="/static/manifest.json">
+  <link rel="icon" type="image/svg+xml" href="/static/icon.svg">
+  <link rel="apple-touch-icon" href="/static/icon.svg">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 <div class="scan-line"></div>
-<div class="center-wrap">
-  <div class="card center-card auth-page fade-in-up" style="text-align:center">
-    <div class="vault-icon">🔐</div>
+
+<main class="center-wrap">
+  <article class="card center-card auth-page fade-in-up" style="text-align:center">
+    <div class="vault-icon" aria-hidden="true">🔐</div>
     <h1>初始化 KeyHub</h1>
     <div class="tagline">// ESTABLISH SECURE VAULT</div>
-    <p class="muted" style="text-align:left;margin-bottom:18px">设置主密码。此密码用于派生主密钥加密所有凭证，<strong style="color:var(--warn)">无法找回</strong>，请妥善保管。</p>
-    <div style="text-align:left">
-      <label>主密码（至少 8 位）</label>
-      <input id="pw" type="password" autocomplete="new-password" placeholder="••••••••••••">
-      <div style="margin-top:12px">
-        <label>确认密码</label>
+    <p class="muted" style="text-align:left;margin-bottom:20px">设置主密码。此密码用于派生主密钥加密所有凭证，<strong style="color:var(--warn)">无法找回</strong>，请妥善保管。</p>
+
+    <form style="text-align:left" onsubmit="event.preventDefault();initSubmit()">
+      <div>
+        <label for="pw">主密码（至少 8 位）</label>
+        <input id="pw" type="password" autocomplete="new-password" placeholder="••••••••••••">
+      </div>
+      <div style="margin-top:14px">
+        <label for="pw2">确认密码</label>
         <input id="pw2" type="password" autocomplete="new-password" placeholder="••••••••••••">
       </div>
-      <div id="err" class="error"></div>
-      <button style="margin-top:18px;width:100%" onclick="initSubmit()" id="submit-btn">
+      <div id="err" class="error" role="alert"></div>
+      <button type="submit" style="margin-top:18px;width:100%" id="submit-btn">
         <span id="btn-text">初始化金库</span>
       </button>
       <div class="warning-box">
@@ -31,9 +39,10 @@
         建议使用 12+ 位含大小写字母/数字/符号的强密码<br>
         建议立即创建加密备份
       </div>
-    </div>
-  </div>
-</div>
+    </form>
+  </article>
+</main>
+
 <script src="/static/app.js"></script>
 </body>
 </html>

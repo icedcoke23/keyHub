@@ -3,27 +3,36 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#030712">
   <title>{{ title }}</title>
+  <link rel="manifest" href="/static/manifest.json">
+  <link rel="icon" type="image/svg+xml" href="/static/icon.svg">
+  <link rel="apple-touch-icon" href="/static/icon.svg">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 <div class="scan-line"></div>
-<div class="center-wrap">
-  <div class="card center-card auth-page fade-in-up" style="text-align:center">
-    <div class="vault-icon">🔓</div>
+
+<main class="center-wrap">
+  <article class="card center-card auth-page fade-in-up" style="text-align:center">
+    <div class="vault-icon" aria-hidden="true">🔓</div>
     <h1>解锁 KeyHub</h1>
     <div class="tagline">// AUTHENTICATE TO ACCESS VAULT</div>
-    <div style="text-align:left;margin-top:20px">
-      <label>主密码</label>
-      <input id="pw" type="password" autocomplete="current-password" placeholder="••••••••••••" onkeydown="if(event.key==='Enter')unlockSubmit()">
-      <div id="err" class="error"></div>
-      <button style="margin-top:18px;width:100%" onclick="unlockSubmit()" id="submit-btn">
+
+    <form style="text-align:left;margin-top:24px" onsubmit="event.preventDefault();unlockSubmit()">
+      <div>
+        <label for="pw">主密码</label>
+        <input id="pw" type="password" autocomplete="current-password" placeholder="••••••••••••" onkeydown="if(event.key==='Enter')unlockSubmit()">
+      </div>
+      <div id="err" class="error" role="alert"></div>
+      <button type="submit" style="margin-top:18px;width:100%" id="submit-btn">
         <span id="btn-text">解锁</span>
       </button>
-    </div>
-  </div>
-</div>
+    </form>
+  </article>
+</main>
+
 <script src="/static/app.js"></script>
 </body>
 </html>

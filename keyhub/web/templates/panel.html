@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="theme-color" content="#07090d">
+  <meta name="theme-color" content="#030712">
   <title>{{ title }}</title>
   <link rel="manifest" href="/static/manifest.json">
   <link rel="icon" type="image/svg+xml" href="/static/icon.svg">
@@ -13,58 +13,59 @@
 </head>
 <body>
 <div class="scan-line"></div>
-<div class="container" id="panel">
+
+<main class="container" id="panel">
 
   <!-- 导航 -->
-  <div class="nav fade-in-up">
+  <nav class="nav fade-in-up" aria-label="主导航">
     <div class="logo">
-      <span class="key-icon">🔑</span>
+      <span class="key-icon" aria-hidden="true">🔑</span>
       <span>KeyHub</span>
       <span class="brand-sub">SECURE VAULT</span>
     </div>
-    <div style="display:flex;gap:8px;align-items:center">
+    <div style="display:flex;gap:10px;align-items:center">
       <span class="tag ok" id="status-badge"><span id="status-text">已解锁</span></span>
-      <button class="theme-toggle" onclick="toggleTheme()" title="切换主题">🌙</button>
+      <button class="theme-toggle" onclick="toggleTheme()" title="切换主题" aria-label="切换主题">🌙</button>
       <button class="small ghost" onclick="logout()">锁定退出</button>
     </div>
-  </div>
+  </nav>
 
   <!-- 统计卡片 -->
-  <div class="stats stagger" style="margin-bottom:18px">
-    <div class="stat">
+  <section class="stats stagger" style="margin-bottom:20px" aria-label="概览统计">
+    <article class="stat">
       <div class="num" id="stat-creds">-</div>
       <div class="lbl">凭证总数</div>
-    </div>
-    <div class="stat">
+    </article>
+    <article class="stat">
       <div class="num" id="stat-llm">-</div>
       <div class="lbl">LLM Keys</div>
-    </div>
-    <div class="stat">
+    </article>
+    <article class="stat">
       <div class="num accent" id="stat-active">-</div>
       <div class="lbl">活跃 Key</div>
-    </div>
-    <div class="stat">
+    </article>
+    <article class="stat">
       <div class="num" id="stat-cost">-</div>
       <div class="lbl">累计成本 ($)</div>
-    </div>
-  </div>
+    </article>
+  </section>
 
-  <div class="card card-corner fade-in-up">
-    <div class="tabs">
-      <div class="tab active" id="t-creds" onclick="switchTab('creds')">凭证</div>
-      <div class="tab" id="t-llm" onclick="switchTab('llm')">LLM 代理</div>
-      <div class="tab" id="t-usage" onclick="switchTab('usage')">用量</div>
-      <div class="tab" id="t-rotation" onclick="switchTab('rotation')">轮换</div>
-      <div class="tab" id="t-audit" onclick="switchTab('audit')">审计</div>
-      <div class="tab" id="t-security" onclick="switchTab('security')">安全</div>
+  <section class="card card-corner fade-in-up">
+    <div class="tabs" role="tablist" aria-label="功能标签">
+      <div class="tab active" id="t-creds" role="tab" aria-selected="true" tabindex="0" onclick="switchTab('creds')">凭证</div>
+      <div class="tab" id="t-llm" role="tab" aria-selected="false" tabindex="-1" onclick="switchTab('llm')">LLM 代理</div>
+      <div class="tab" id="t-usage" role="tab" aria-selected="false" tabindex="-1" onclick="switchTab('usage')">用量</div>
+      <div class="tab" id="t-rotation" role="tab" aria-selected="false" tabindex="-1" onclick="switchTab('rotation')">轮换</div>
+      <div class="tab" id="t-audit" role="tab" aria-selected="false" tabindex="-1" onclick="switchTab('audit')">审计</div>
+      <div class="tab" id="t-security" role="tab" aria-selected="false" tabindex="-1" onclick="switchTab('security')">安全</div>
     </div>
 
     <!-- ===== 凭证 ===== -->
-    <div id="tab-creds">
+    <section id="tab-creds" role="tabpanel">
       <h2>新增凭证</h2>
       <div class="row">
-        <div><label>名称</label><input id="c-name" placeholder="openai-main"></div>
-        <div><label>类型</label>
+        <div><label for="c-name">名称</label><input id="c-name" placeholder="openai-main"></div>
+        <div><label for="c-type">类型</label>
           <select id="c-type">
             <option value="password">password</option>
             <option value="token">token</option>
@@ -74,44 +75,48 @@
             <option value="other">other</option>
           </select>
         </div>
-        <div><label>轮换周期(天)</label><input id="c-rot" type="number" placeholder="90"></div>
+        <div><label for="c-rot">轮换周期(天)</label><input id="c-rot" type="number" placeholder="90"></div>
       </div>
-      <div class="row" style="margin-top:12px">
-        <div style="flex:1"><label>明文值</label><input id="c-value" type="password" placeholder="sk-..."></div>
+      <div class="row" style="margin-top:14px">
+        <div style="flex:1"><label for="c-value">明文值</label><input id="c-value" type="password" placeholder="sk-..."></div>
         <div class="nogrow"><button class="secondary small" onclick="genPassword()">生成</button></div>
       </div>
-      <div class="row" style="margin-top:12px">
-        <div><label>LLM 供应商（type=llm）</label><input id="c-provider" placeholder="openai"></div>
-        <div><label>LLM 标签</label><input id="c-label" placeholder="main"></div>
-        <div><label>标签（逗号分隔）</label><input id="c-tags" placeholder="prod, critical"></div>
+      <div class="row" style="margin-top:14px">
+        <div><label for="c-provider">LLM 供应商（type=llm）</label><input id="c-provider" placeholder="openai"></div>
+        <div><label for="c-label">LLM 标签</label><input id="c-label" placeholder="main"></div>
+        <div><label for="c-tags">标签（逗号分隔）</label><input id="c-tags" placeholder="prod, critical"></div>
         <div class="nogrow"><button onclick="createCred()">添加凭证</button></div>
       </div>
-      <div id="c-err" class="error"></div>
+      <div id="c-err" class="error" role="alert"></div>
 
-      <h2 style="margin-top:28px">凭证列表</h2>
-      <div class="row" style="margin-bottom:14px">
+      <h2 style="margin-top:32px">凭证列表</h2>
+      <div class="row" style="margin-bottom:16px">
         <div><input id="c-search" placeholder="搜索凭证名..." oninput="loadCreds()"></div>
         <div><input id="c-tag-filter" placeholder="标签过滤..." oninput="loadCreds()"></div>
       </div>
-      <table>
-        <thead><tr><th>名称</th><th>类型</th><th>供应商/标签</th><th>状态</th><th>到期</th><th>标签</th><th>操作</th></tr></thead>
-        <tbody id="cred-tbody"></tbody>
-      </table>
-    </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>名称</th><th>类型</th><th>供应商/标签</th><th>状态</th><th>到期</th><th>标签</th><th>操作</th></tr></thead>
+          <tbody id="cred-tbody"></tbody>
+        </table>
+      </div>
+    </section>
 
     <!-- ===== LLM 代理 ===== -->
-    <div id="tab-llm" class="hidden">
+    <section id="tab-llm" class="hidden" role="tabpanel">
       <h2>LLM Key 状态</h2>
-      <div id="llm-cost" class="stats" style="margin-bottom:16px"></div>
-      <table>
-        <thead><tr><th>供应商</th><th>标签</th><th>状态</th><th>请求数</th><th>成本</th><th>操作</th></tr></thead>
-        <tbody id="llm-keys"></tbody>
-      </table>
+      <div id="llm-cost" class="stats" style="margin-bottom:18px"></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>供应商</th><th>标签</th><th>状态</th><th>请求数</th><th>成本</th><th>操作</th></tr></thead>
+          <tbody id="llm-keys"></tbody>
+        </table>
+      </div>
 
-      <h2 style="margin-top:28px">Playground</h2>
+      <h2 style="margin-top:32px">Playground</h2>
       <div class="playground">
         <div class="chat-toolbar">
-          <select id="chat-model" class="chat-model-select">
+          <select id="chat-model" class="chat-model-select" aria-label="选择模型">
             <option value="">加载模型中...</option>
           </select>
           <button class="ghost small" id="chat-clear-btn" onclick="clearChat()">清空对话</button>
@@ -123,41 +128,45 @@
           </div>
         </div>
         <div class="chat-input-area">
-          <textarea id="chat-input" class="chat-input" rows="1" placeholder="输入消息... (Shift+Enter 换行，Enter 发送)"></textarea>
+          <textarea id="chat-input" class="chat-input" rows="1" placeholder="输入消息... (Shift+Enter 换行，Enter 发送)" aria-label="聊天输入"></textarea>
           <div class="chat-input-actions">
             <button class="ghost small" id="chat-stop-btn" onclick="stopChatPlayground()" disabled>停止</button>
             <button id="chat-send-btn" onclick="sendChatMessage()">发送</button>
           </div>
         </div>
-        <div id="chat-err" class="error" style="margin-top:8px;display:none"></div>
+        <div id="chat-err" class="error" style="margin-top:8px;display:none" role="alert"></div>
       </div>
-    </div>
+    </section>
 
     <!-- ===== 用量 ===== -->
-    <div id="tab-usage" class="hidden">
+    <section id="tab-usage" class="hidden" role="tabpanel">
       <h2>成本趋势</h2>
       <div id="cost-trend-chart" class="chart-container"></div>
       <h2>最近调用</h2>
-      <table>
-        <thead><tr><th>时间</th><th>Key</th><th>模型</th><th>token(in/out)</th><th>成本</th><th>延迟</th><th>结果</th></tr></thead>
-        <tbody id="usage-tbody"></tbody>
-      </table>
-    </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>时间</th><th>Key</th><th>模型</th><th>token(in/out)</th><th>成本</th><th>延迟</th><th>结果</th></tr></thead>
+          <tbody id="usage-tbody"></tbody>
+        </table>
+      </div>
+    </section>
 
     <!-- ===== 轮换 ===== -->
-    <div id="tab-rotation" class="hidden">
+    <section id="tab-rotation" class="hidden" role="tabpanel">
       <h2>轮换提醒</h2>
-      <table>
-        <thead><tr><th>名称</th><th>类型</th><th>距到期</th><th>上次轮换</th><th>状态</th></tr></thead>
-        <tbody id="rot-tbody"></tbody>
-      </table>
-    </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>名称</th><th>类型</th><th>距到期</th><th>上次轮换</th><th>状态</th></tr></thead>
+          <tbody id="rot-tbody"></tbody>
+        </table>
+      </div>
+    </section>
 
-    <!-- ===== 审计（新增）===== -->
-    <div id="tab-audit" class="hidden">
+    <!-- ===== 审计 ===== -->
+    <section id="tab-audit" class="hidden" role="tabpanel">
       <h2>审计日志</h2>
-      <div class="row" style="margin-bottom:14px">
-        <div><label>动作过滤</label>
+      <div class="row" style="margin-bottom:16px">
+        <div><label for="a-action">动作过滤</label>
           <select id="a-action" onchange="loadAudit()">
             <option value="">全部</option>
             <option value="credential.create">凭证创建</option>
@@ -177,46 +186,48 @@
           <button class="ghost" onclick="loadAudit()">刷新</button>
         </div>
       </div>
-      <div id="audit-list" style="border:1px solid var(--border-soft);border-radius:var(--radius-sm);overflow:hidden"></div>
-    </div>
+      <div id="audit-list"></div>
+    </section>
 
-    <!-- ===== 安全（新增）===== -->
-    <div id="tab-security" class="hidden">
+    <!-- ===== 安全 ===== -->
+    <section id="tab-security" class="hidden" role="tabpanel">
       <h2>修改主密码</h2>
-      <p class="muted" style="margin-bottom:14px">变更后将重新加密所有凭证。操作不可撤销，请确保新密码妥善保管。</p>
-      <div style="max-width:420px">
-        <div><label>旧主密码</label><input id="s-old" type="password" autocomplete="current-password"></div>
-        <div style="margin-top:12px"><label>新主密码（至少 8 位）</label><input id="s-new" type="password" autocomplete="new-password"></div>
-        <div style="margin-top:12px"><label>确认新密码</label><input id="s-new2" type="password" autocomplete="new-password"></div>
-        <div id="s-err" class="error"></div>
-        <button style="margin-top:14px;width:100%" onclick="changePassword()">确认变更</button>
+      <p class="muted" style="margin-bottom:16px">变更后将重新加密所有凭证。操作不可撤销，请确保新密码妥善保管。</p>
+      <div style="max-width:440px">
+        <div><label for="s-old">旧主密码</label><input id="s-old" type="password" autocomplete="current-password"></div>
+        <div style="margin-top:14px"><label for="s-new">新主密码（至少 8 位）</label><input id="s-new" type="password" autocomplete="new-password"></div>
+        <div style="margin-top:14px"><label for="s-new2">确认新密码</label><input id="s-new2" type="password" autocomplete="new-password"></div>
+        <div id="s-err" class="error" role="alert"></div>
+        <button style="margin-top:16px;width:100%" onclick="changePassword()">确认变更</button>
       </div>
 
-      <h2 style="margin-top:32px">API Token 管理</h2>
-      <div class="row" style="margin-bottom:14px">
-        <div><label>Token 名称</label><input id="t-name" placeholder="ci-deploy"></div>
-        <div><label>Scope（逗号分隔）</label><input id="t-scopes" value="credentials:read" placeholder="credentials:read,llm:chat"></div>
+      <h2 style="margin-top:36px">API Token 管理</h2>
+      <div class="row" style="margin-bottom:16px">
+        <div><label for="t-name">Token 名称</label><input id="t-name" placeholder="ci-deploy"></div>
+        <div><label for="t-scopes">Scope（逗号分隔）</label><input id="t-scopes" value="credentials:read" placeholder="credentials:read,llm:chat"></div>
         <div class="nogrow"><button onclick="createToken()">创建</button></div>
       </div>
-      <table>
-        <thead><tr><th>名称</th><th>Scopes</th><th>创建时间</th><th>上次使用</th><th>状态</th><th>操作</th></tr></thead>
-        <tbody id="token-tbody"></tbody>
-      </table>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>名称</th><th>Scopes</th><th>创建时间</th><th>上次使用</th><th>状态</th><th>操作</th></tr></thead>
+          <tbody id="token-tbody"></tbody>
+        </table>
+      </div>
 
-      <h2 style="margin-top:32px">通知测试</h2>
-      <p class="muted" style="margin-bottom:14px">发送一条测试通知到已配置的 Webhook / 邮箱 / 控制台。</p>
+      <h2 style="margin-top:36px">通知测试</h2>
+      <p class="muted" style="margin-bottom:16px">发送一条测试通知到已配置的 Webhook / 邮箱 / 控制台。</p>
       <button class="secondary" onclick="testNotify()">发送测试通知</button>
-    </div>
-  </div>
-</div>
+    </section>
+  </section>
+</main>
 
 <!-- 明文展示弹层 -->
-<div id="secret-modal" class="modal-backdrop hidden">
+<div id="secret-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="secret-name">
   <div class="card modal-card">
     <h2 id="secret-name"></h2>
     <label>明文（仅本次展示，关闭后不可恢复）</label>
     <div class="secret-box" id="secret-box"></div>
-    <div style="margin-top:14px;display:flex;gap:8px">
+    <div style="margin-top:16px;display:flex;gap:10px">
       <button class="secondary" style="flex:1" onclick="copySecret()">复制</button>
       <button class="danger" style="flex:1" onclick="closeSecret()">关闭</button>
     </div>
@@ -224,15 +235,15 @@
 </div>
 
 <!-- Token 创建结果弹层 -->
-<div id="token-modal" class="modal-backdrop hidden">
+<div id="token-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-label="Token 已创建">
   <div class="card modal-card">
     <h2>Token 已创建</h2>
-    <div class="warning-box" style="background:var(--warn-soft);border:1px solid rgba(255,179,71,0.3);border-radius:var(--radius-sm);padding:12px 14px;font-size:12px;color:var(--warn);font-family:var(--font-mono);line-height:1.6;margin-bottom:14px">
+    <div class="warning-box" style="background:var(--warn-soft);border:1px solid rgba(251,191,36,0.25);border-radius:var(--radius-sm);padding:14px 16px;font-size:12px;color:var(--warn);font-family:var(--font-mono);line-height:1.7;margin-bottom:16px">
       ⚠ 此 Token 仅显示一次，关闭后无法再次查看。请立即复制保存。
     </div>
     <label>Token 明文</label>
     <div class="secret-box" id="token-plain" style="word-break:break-all"></div>
-    <div style="margin-top:14px;display:flex;gap:8px">
+    <div style="margin-top:16px;display:flex;gap:10px">
       <button class="secondary" style="flex:1" onclick="copyToken()">复制</button>
       <button style="flex:1" onclick="closeTokenModal()">我已保存</button>
     </div>
@@ -240,7 +251,7 @@
 </div>
 
 <!-- Toast 容器 -->
-<div class="toast-container" id="toast-container"></div>
+<div class="toast-container" id="toast-container" aria-live="polite" aria-atomic="true"></div>
 
 <script src="/static/app.js"></script>
 </body>

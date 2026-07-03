@@ -48,6 +48,7 @@ function toast(msg, type = 'info', duration = 3500) {
   const icons = { success: '✓', error: '✕', info: 'ℹ' };
   const t = document.createElement('div');
   t.className = `toast ${type}`;
+  t.style.setProperty('--toast-duration', duration + 'ms');
   t.innerHTML = `<span class="toast-icon">${icons[type] || ''}</span><span>${esc(msg)}</span>`;
   container.appendChild(t);
   setTimeout(() => {
@@ -104,6 +105,17 @@ window.unlockSubmit = async function () {
 // ===== 控制台主入口 =====
 window.addEventListener('DOMContentLoaded', () => {
   if (!el('panel')) return;
+  // 初始化 tab ARIA 状态
+  ['creds', 'llm', 'usage', 'rotation', 'audit', 'security'].forEach(n => {
+    const panel = el('tab-' + n);
+    const tab = el('t-' + n);
+    const active = n === 'creds';
+    if (panel) panel.setAttribute('aria-hidden', active ? 'false' : 'true');
+    if (tab) {
+      tab.setAttribute('aria-selected', active ? 'true' : 'false');
+      tab.setAttribute('tabindex', active ? '0' : '-1');
+    }
+  });
   loadCreds();
   loadLLM();
   loadStats();
@@ -112,57 +124,97 @@ window.addEventListener('DOMContentLoaded', () => {
 });
 
 function switchTab(name) {
-  ['creds', 'llm', 'usage', 'rotation', 'audit', 'security'].forEach(n => {
-    show('tab-' + n, n === name);
-    el('t-' + n)?.classList.toggle('active', n === name);
+  const tabs = ['creds', 'llm', 'usage', 'rotation', 'audit', 'security'];
+  tabs.forEach(n => {
+    const panel = el('tab-' + n);
+    const tab = el('t-' + n);
+    const active = n === name;
+    show('tab-' + n, active);
+    if (tab) {
+      tab.classList.toggle('active', active);
+      tab.setAttribute('aria-selected', active ? 'true' : 'false');
+      tab.setAttribute('tabindex', active ? '0' : '-1');
+    }
+    if (panel) panel.setAttribute('aria-hidden', active ? 'false' : 'true');
   });
   if (name !== 'audit') {
     disconnectAuditSSE();
   }
   if (name === 'rotation') loadReminders();
-  if (name === 'usage') loadUsage();
+  if (name === 'usage') { loadUsage(); setTimeout(loadCostTrend, 80); }
   if (name === 'llm') loadLLM();
   if (name === 'audit') loadAudit();
   if (name === 'security') loadTokens();
 }
 window.switchTab = switchTab;
 
+// Tab 键盘导航
+document.addEventListener('keydown', (e) => {
+  const activeTab = document.querySelector('.tab.active');
+  if (!activeTab || document.activeElement !== activeTab) return;
+  const tabs = Array.from(document.querySelectorAll('.tab'));
+  const idx = tabs.indexOf(activeTab);
+  if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+    e.preventDefault();
+    const next = tabs[(idx + 1) % tabs.length];
+    next.click(); next.focus();
+  } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    const prev = tabs[(idx - 1 + tabs.length) % tabs.length];
+    prev.click(); prev.focus();
+  } else if (e.key === 'Enter' || e.key === ' ') {
+    e.preventDefault();
+    activeTab.click();
+  }
+});
+
 // ===== 凭证 =====
 async function loadCreds() {
   const tbody = el('cred-tbody');
   if (!tbody) return;
-  tbody.innerHTML = '<tr><td colspan="6"><div class="skeleton" style="height:14px;width:80%"></div></td></tr>';
+  tbody.innerHTML = '<tr><td colspan="7"><div class="skeleton" style="height:14px;width:80%"></div></td></tr>';
   try {
-    const list = await api('/api/credentials');
-    if (!list.length) {
-      tbody.innerHTML = '<tr><td colspan="6" class="muted" style="text-align:center;padding:24px">暂无凭证，请在上方添加</td></tr>';
+    const search = el('c-search')?.value?.trim() || '';
+    const tagFilter = el('c-tag-filter')?.value?.trim() || '';
+    let url = '/api/credentials';
+    const params = [];
+    if (search) params.push('q=' + encodeURIComponent(search));
+    if (tagFilter) params.push('tag=' + encodeURIComponent(tagFilter));
+    if (params.length) url += '?' + params.join('&');
+
+    const creds = await api(url);
+    if (!creds.length) {
+      tbody.innerHTML = `<tr><td colspan="7"><div class="empty-state"><div class="empty-state-icon">🗂️</div><div class="empty-state-text">${search || tagFilter ? '没有匹配的凭证' : '暂无凭证，请在上方添加'}</div></div></td></tr>`;
       return;
     }
-    tbody.innerHTML = list.map(c => `
-      <tr>
+    tbody.innerHTML = creds.map(c => `
+      <tr style="animation:fadeInUp 0.4s var(--ease-out-expo) both">
         <td><strong>${esc(c.name)}</strong></td>
         <td><span class="tag">${esc(c.type)}</span></td>
-        <td>${c.provider ? esc(c.provider) + '/' + esc(c.label) : '<span class="muted">-</span>'}</td>
+        <td>${c.provider ? esc(c.provider) + '/' + esc(c.label || '') : '<span class="muted">-</span>'}</td>
         <td>${c.llm_status ? `<span class="tag ${c.llm_status === 'active' ? 'ok' : 'warn'}">${esc(c.llm_status)}</span>` : '<span class="muted">-</span>'}</td>
         <td>${c.expires_at ? esc(c.expires_at.slice(0, 10)) : '<span class="muted">-</span>'}</td>
+        <td>${(c.tags || []).map(t => `<span class="tag">${esc(t)}</span>`).join(' ') || '<span class="muted">-</span>'}</td>
         <td>
           <button class="small secondary" data-action="reveal" data-name="${esc(c.name)}">查看</button>
           <button class="small secondary" data-action="rotate" data-name="${esc(c.name)}">轮换</button>
           <button class="small danger" data-action="del" data-name="${esc(c.name)}">删</button>
         </td>
       </tr>`).join('');
-    tbody.querySelectorAll('button[data-action]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const action = btn.dataset.action;
-        const name = btn.dataset.name;
-        if (action === 'reveal') reveal(name);
-        else if (action === 'rotate') rotate(name);
-        else if (action === 'del') del(name);
-      });
-    });
-  } catch (e) { toast(e.message, 'error'); }
+  } catch (e) { toast('加载失败: ' + e.message, 'error'); }
 }
 window.loadCreds = loadCreds;
+
+// 凭证操作事件委托
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-action]');
+  if (!btn || !btn.closest('#cred-tbody')) return;
+  const action = btn.dataset.action;
+  const name = btn.dataset.name;
+  if (action === 'reveal') reveal(name);
+  else if (action === 'rotate') rotate(name);
+  else if (action === 'del') del(name);
+});
 
 window.createCred = async function () {
   const body = {
@@ -238,29 +290,33 @@ async function loadLLM() {
   try {
     const [keys, cost] = await Promise.all([api('/api/llm/keys'), api('/api/llm/cost')]);
     el('llm-keys').innerHTML = keys.length ? keys.map(k => `
-      <tr>
+      <tr style="animation:fadeInUp 0.4s var(--ease-out-expo) both">
         <td><strong>${esc(k.provider)}</strong></td>
         <td>${esc(k.label)} <span class="muted">(${esc(k.name)})</span></td>
         <td><span class="tag ${k.status === 'active' ? 'ok' : 'warn'}">${esc(k.status)}</span></td>
         <td>${k.total_requests}</td>
         <td>$${k.estimated_cost_usd.toFixed(4)}</td>
         <td>
-          <button class="small secondary" data-action="key-active" data-id="${esc(k.id)}">启用</button>
-          <button class="small secondary" data-action="key-disabled" data-id="${esc(k.id)}">停用</button>
+          <button class="small secondary" data-key-action="active" data-id="${esc(k.id)}">启用</button>
+          <button class="small secondary" data-key-action="disabled" data-id="${esc(k.id)}">停用</button>
         </td>
-      </tr>`).join('') : '<tr><td colspan="6" class="muted" style="text-align:center;padding:24px">暂无 LLM key</td></tr>';
-    el('llm-keys').querySelectorAll('button[data-action]').forEach(btn => {
-      btn.addEventListener('click', () => setKeyStatus(btn.dataset.id, btn.dataset.action === 'key-active' ? 'active' : 'disabled'));
-    });
+      </tr>`).join('') : `<tr><td colspan="6"><div class="empty-state"><div class="empty-state-icon">🤖</div><div class="empty-state-text">暂无 LLM key</div></div></td></tr>`;
     let costHtml = '';
     for (const [p, v] of Object.entries(cost)) {
-      costHtml += `<div class="stat"><div class="num accent">$${v.cost_usd.toFixed(4)}</div><div class="lbl">${esc(p)} · ${v.calls} 次调用</div></div>`;
+      costHtml += `<div class="stat" style="animation:fadeInUp 0.5s var(--ease-out-expo) both"><div class="num accent">$${v.cost_usd.toFixed(4)}</div><div class="lbl">${esc(p)} · ${v.calls} 次调用</div></div>`;
     }
-    el('llm-cost').innerHTML = costHtml || '<div class="muted">暂无用量</div>';
+    el('llm-cost').innerHTML = costHtml || '<div class="empty-state" style="padding:24px"><div class="empty-state-icon">📊</div><div class="empty-state-text">暂无用量</div></div>';
   } catch (e) { console.error(e); }
   loadChatModels();
 }
 window.loadLLM = loadLLM;
+
+// LLM key 操作事件委托
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-key-action]');
+  if (!btn || !btn.closest('#llm-keys')) return;
+  setKeyStatus(btn.dataset.id, btn.dataset.keyAction);
+});
 
 async function loadChatModels() {
   const sel = el('chat-model');
@@ -627,7 +683,7 @@ async function loadUsage() {
   try {
     const list = await api('/api/llm/usage?limit=50');
     el('usage-tbody').innerHTML = list.length ? list.map(u => `
-      <tr>
+      <tr style="animation:fadeInUp 0.35s var(--ease-out-expo) both">
         <td>${esc(u.created_at?.replace('T', ' ').slice(0, 19))}</td>
         <td>${esc(u.provider)}/${esc(u.label)}</td>
         <td>${esc(u.model)}</td>
@@ -635,7 +691,7 @@ async function loadUsage() {
         <td>$${u.cost_usd.toFixed(5)}</td>
         <td>${u.latency_ms}ms</td>
         <td>${u.success ? '<span class="tag ok">ok</span>' : '<span class="tag danger">fail</span>'}</td>
-      </tr>`).join('') : '<tr><td colspan="7" class="muted" style="text-align:center;padding:24px">暂无调用记录</td></tr>';
+      </tr>`).join('') : `<tr><td colspan="7"><div class="empty-state"><div class="empty-state-icon">📈</div><div class="empty-state-text">暂无调用记录</div></div></td></tr>`;
   } catch (e) { console.error(e); }
 }
 window.loadUsage = loadUsage;
@@ -649,14 +705,14 @@ async function loadReminders() {
       let badge = '<span class="tag info">建议轮换</span>';
       if (r.days_until_expire !== null && r.days_until_expire < 0) badge = '<span class="tag danger">已过期</span>';
       else if (r.days_until_expire !== null && r.days_until_expire <= 7) badge = '<span class="tag warn">即将到期</span>';
-      return `<tr>
+      return `<tr style="animation:fadeInUp 0.35s var(--ease-out-expo) both">
         <td><strong>${esc(r.name)}</strong></td>
         <td><span class="tag">${esc(r.type)}</span></td>
         <td>${r.days_until_expire === null ? '-' : r.days_until_expire + ' 天'}</td>
         <td>${r.days_since_rotation === null ? '-' : r.days_since_rotation + ' 天前'}</td>
         <td>${badge}</td>
       </tr>`;
-    }).join('') : '<tr><td colspan="5" class="muted" style="text-align:center;padding:24px">无需轮换的凭证</td></tr>';
+    }).join('') : `<tr><td colspan="5"><div class="empty-state"><div class="empty-state-icon">🛡️</div><div class="empty-state-text">无需轮换的凭证</div></div></td></tr>`;
   } catch (e) { console.error(e); }
 }
 window.loadReminders = loadReminders;
@@ -680,8 +736,8 @@ let auditEventSource = null;
 function appendAuditEntry(x) {
   const list = el('audit-list');
   if (!list) return;
-  const emptyMsg = list.querySelector('.muted');
-  if (emptyMsg && emptyMsg.textContent.includes('暂无审计记录')) {
+  const emptyMsg = list.querySelector('.empty-state');
+  if (emptyMsg) {
     list.innerHTML = '';
   }
   const loading = list.querySelector('.loading');
@@ -733,12 +789,12 @@ function disconnectAuditSSE() {
 async function loadAudit() {
   if (!el('audit-list')) return;
   const action = el('a-action')?.value || '';
-  el('audit-list').innerHTML = '<div style="padding:20px;text-align:center"><span class="loading"></span> 加载中...</div>';
+  el('audit-list').innerHTML = '<div class="empty-state" style="padding:28px"><span class="loading"></span><div class="empty-state-text" style="margin-top:12px">加载中...</div></div>';
   try {
     const url = '/api/audit/logs?limit=100' + (action ? `&action=${action}` : '');
     const list = await api(url);
     if (!list.length) {
-      el('audit-list').innerHTML = '<div class="muted" style="padding:24px;text-align:center">暂无审计记录</div>';
+      el('audit-list').innerHTML = '<div class="empty-state" style="padding:28px"><div class="empty-state-icon">📋</div><div class="empty-state-text">暂无审计记录</div></div>';
     } else {
       el('audit-list').innerHTML = list.map(x => {
         const time = x.created_at?.replace('T', ' ').slice(0, 19) || '-';
@@ -778,27 +834,29 @@ async function loadTokens() {
   try {
     const list = await api('/api/auth/tokens');
     el('token-tbody').innerHTML = list.length ? list.map(t => `
-      <tr>
+      <tr style="animation:fadeInUp 0.35s var(--ease-out-expo) both">
         <td><strong>${esc(t.name)}</strong></td>
         <td>${(t.scopes || []).map(s => `<span class="tag info">${esc(s)}</span>`).join(' ')}</td>
         <td>${esc(t.created_at?.replace('T', ' ').slice(0, 19))}</td>
         <td>${t.last_used_at ? esc(t.last_used_at.replace('T', ' ').slice(0, 19)) : '<span class="muted">从未</span>'}</td>
         <td>${t.revoked ? '<span class="tag danger">已吊销</span>' : '<span class="tag ok">有效</span>'}</td>
-        <td>${t.revoked ? '' : `<button class="small danger" data-action="revoke" data-id="${esc(t.id)}">吊销</button>`}</td>
-      </tr>`).join('') : '<tr><td colspan="6" class="muted" style="text-align:center;padding:24px">暂无 Token</td></tr>';
-    el('token-tbody').querySelectorAll('button[data-action="revoke"]').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        if (!confirm('确认吊销此 Token？吊销后立即失效，不可恢复。')) return;
-        try {
-          await api('/api/auth/tokens/' + btn.dataset.id, { method: 'DELETE' });
-          toast('Token 已吊销', 'success');
-          loadTokens();
-        } catch (e) { toast(e.message, 'error'); }
-      });
-    });
+        <td>${t.revoked ? '' : `<button class="small danger" data-token-action="revoke" data-id="${esc(t.id)}">吊销</button>`}</td>
+      </tr>`).join('') : `<tr><td colspan="6"><div class="empty-state"><div class="empty-state-icon">🔖</div><div class="empty-state-text">暂无 Token</div></div></td></tr>`;
   } catch (e) { toast(e.message, 'error'); }
 }
 window.loadTokens = loadTokens;
+
+// Token 操作事件委托
+document.addEventListener('click', async (e) => {
+  const btn = e.target.closest('button[data-token-action="revoke"]');
+  if (!btn || !btn.closest('#token-tbody')) return;
+  if (!confirm('确认吊销此 Token？吊销后立即失效，不可恢复。')) return;
+  try {
+    await api('/api/auth/tokens/' + btn.dataset.id, { method: 'DELETE' });
+    toast('Token 已吊销', 'success');
+    loadTokens();
+  } catch (e) { toast(e.message, 'error'); }
+});
 
 window.createToken = async function () {
   const name = el('t-name').value;
@@ -822,6 +880,20 @@ window.copyToken = async function () {
     toast('Token 已复制', 'success', 2000);
   } catch { toast('复制失败', 'error'); }
 };
+
+// 弹层交互：点击背景关闭 / ESC 关闭
+document.addEventListener('click', (e) => {
+  if (e.target.classList.contains('modal-backdrop') && !e.target.classList.contains('hidden')) {
+    const id = e.target.id;
+    if (id === 'secret-modal') closeSecret();
+    else if (id === 'token-modal') closeTokenModal();
+  }
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  if (!el('secret-modal')?.classList.contains('hidden')) closeSecret();
+  if (!el('token-modal')?.classList.contains('hidden')) closeTokenModal();
+});
 
 window.testNotify = async function () {
   try {
@@ -863,43 +935,6 @@ async function genPassword() {
 }
 window.genPassword = genPassword;
 
-// ===== 凭证搜索与标签过滤 =====
-// 修改 loadCreds 函数支持搜索
-const _origLoadCreds = window.loadCreds;
-window.loadCreds = async function() {
-  const search = el('c-search')?.value || '';
-  const tagFilter = el('c-tag-filter')?.value || '';
-  let url = '/api/credentials';
-  const params = [];
-  if (search) params.push('q=' + encodeURIComponent(search));
-  if (tagFilter) params.push('tag=' + encodeURIComponent(tagFilter));
-  if (params.length) url += '?' + params.join('&');
-  try {
-    const creds = await api(url);
-    const tbody = el('cred-tbody');
-    if (!tbody) return;
-    if (!creds.length) {
-      tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--muted)">暂无凭证</td></tr>';
-      return;
-    }
-    tbody.innerHTML = creds.map(c => `
-      <tr>
-        <td>${esc(c.name)}</td>
-        <td>${esc(c.type)}</td>
-        <td>${c.provider ? esc(c.provider) + '/' + esc(c.label || '') : '-'}</td>
-        <td>${c.llm_status ? `<span class="tag ${c.llm_status === 'active' ? 'ok' : 'warn'}">${esc(c.llm_status)}</span>` : '-'}</td>
-        <td>${c.expires_at ? esc(c.expires_at.slice(0,10)) : '-'}</td>
-        <td>${(c.tags || []).map(t => `<span class="tag">${esc(t)}</span>`).join(' ') || '-'}</td>
-        <td>
-          <button class="small secondary" onclick="reveal('${esc(c.name)}')">查看</button>
-          <button class="small secondary" onclick="rotate('${esc(c.name)}')">轮换</button>
-          <button class="small danger" onclick="del('${esc(c.name)}')">删</button>
-        </td>
-      </tr>
-    `).join('');
-  } catch (e) { toast('加载失败: ' + e.message, 'error'); }
-};
-
 // ===== 成本趋势图 =====
 async function loadCostTrend() {
   try {
@@ -907,13 +942,13 @@ async function loadCostTrend() {
     const container = el('cost-trend-chart');
     if (!container) return;
     if (!data.length) {
-      container.innerHTML = '<div style="margin:auto;color:var(--muted)">暂无数据</div>';
+      container.innerHTML = '<div class="empty-state" style="margin:auto"><div class="empty-state-icon">📉</div><div class="empty-state-text">暂无数据</div></div>';
       return;
     }
     const maxCost = Math.max(...data.map(d => d.cost), 0.01);
-    container.innerHTML = data.map(d => {
+    container.innerHTML = data.map((d, i) => {
       const h = Math.max((d.cost / maxCost) * 100, 2);
-      return `<div class="chart-bar" style="height:${h}%" data-label="${d.date.slice(5)}" data-value="$${d.cost.toFixed(4)}"></div>`;
+      return `<div class="chart-bar" style="height:${h}%;animation:fadeInUp 0.5s var(--ease-out-expo) ${i * 0.05}s both" data-label="${d.date.slice(5)}" data-value="$${d.cost.toFixed(4)}"></div>`;
     }).join('');
   } catch (e) { console.error('cost trend:', e); }
 }
@@ -930,8 +965,8 @@ document.addEventListener('keydown', (e) => {
     const s = el('c-search');
     if (s) s.focus();
   } else if (e.key === 'Escape') {
-    const modal = document.querySelector('.modal:not(.hidden)');
-    if (modal) modal.classList.add('hidden');
+    if (!el('secret-modal')?.classList.contains('hidden')) closeSecret();
+    else if (!el('token-modal')?.classList.contains('hidden')) closeTokenModal();
   } else if (e.key >= '1' && e.key <= '6') {
     const tabs = ['creds', 'llm', 'usage', 'rotation', 'audit', 'security'];
     const idx = parseInt(e.key) - 1;
@@ -939,9 +974,4 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-// 切换到用量 tab 时加载趋势图
-const _origSwitchTab = window.switchTab;
-window.switchTab = function(tab) {
-  if (_origSwitchTab) _origSwitchTab(tab);
-  if (tab === 'usage') setTimeout(loadCostTrend, 100);
-};
+
