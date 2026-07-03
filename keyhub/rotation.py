@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from datetime import datetime, timedelta
@@ -19,6 +20,8 @@ from .config import get_settings
 from .db import session_scope
 from .models import Credential
 from .schemas import RotationReminder
+
+logger = logging.getLogger(__name__)
 
 
 class RotationChecker:
@@ -33,6 +36,7 @@ class RotationChecker:
                 cls._instance._last_check = None  # type: ignore[attr-defined]
                 cls._instance._stop = threading.Event()  # type: ignore[attr-defined]
                 cls._instance._thread = None  # type: ignore[attr-defined]
+                cls._instance._data_lock = threading.Lock()  # type: ignore[attr-defined]
             return cls._instance
 
     def check_once(self) -> list[RotationReminder]:
@@ -82,14 +86,19 @@ class RotationChecker:
                         days_since_rotation=days_since_rotation,
                     ))
 
-        self._reminders = reminders
-        self._last_check = now
+        with self._data_lock:
+            self._reminders = reminders
+            self._last_check = now
         return reminders
 
     def get_reminders(self) -> list[RotationReminder]:
-        if self._last_check is None:
-            return self.check_once()
-        return list(self._reminders)
+        with self._data_lock:
+            if self._last_check is None:
+                # 锁外执行首次检查（涉及 DB IO，避免长时间持锁）
+                pass
+            else:
+                return list(self._reminders)
+        return self.check_once()
 
     # ===== 后台线程 =====
 
@@ -106,9 +115,9 @@ class RotationChecker:
                     rs = self.check_once()
                     if rs and on_remind:
                         on_remind(rs)
-                except Exception as e:  # noqa: BLE001
-                    # 后台任务异常不应崩溃
-                    print(f"[rotation] check failed: {e}", flush=True)
+                except Exception:  # noqa: BLE001
+                    # 后台任务异常不应崩溃，但需留结构化日志
+                    logger.exception("rotation check failed")
                 self._stop.wait(interval)
 
         self._thread = threading.Thread(target=_loop, daemon=True, name="rotation-checker")

@@ -4,11 +4,14 @@
 """
 from __future__ import annotations
 
+import logging
 import threading
 import time
 
 from .config import get_settings
 from .runtime import get_runtime
+
+logger = logging.getLogger(__name__)
 
 
 class AutoLockChecker:
@@ -23,6 +26,7 @@ class AutoLockChecker:
                 cls._instance._last_activity = time.monotonic()
                 cls._instance._thread = None
                 cls._instance._running = False
+                cls._instance._start_lock = threading.Lock()
             return cls._instance
 
     def touch(self):
@@ -31,11 +35,13 @@ class AutoLockChecker:
 
     def start(self):
         """启动后台检查线程。"""
-        if self._thread and self._thread.is_alive():
-            return
-        self._running = True
-        self._thread = threading.Thread(target=self._loop, daemon=True, name="auto-lock")
-        self._thread.start()
+        # 用 _start_lock 保护整个 check-then-start，避免并发创建两个 daemon
+        with self._start_lock:
+            if self._thread and self._thread.is_alive():
+                return
+            self._running = True
+            self._thread = threading.Thread(target=self._loop, daemon=True, name="auto-lock")
+            self._thread.start()
 
     def stop(self):
         """停止后台检查线程。"""
@@ -50,16 +56,18 @@ class AutoLockChecker:
                 elapsed = time.monotonic() - self._last_activity
                 if elapsed > idle:
                     rt = get_runtime()
-                    if rt.unlocked:
-                        rt.lock()
-                        # 审计
+                    # 直接调用 lock()，其内部在写锁内判断 _vault 是否为 None，
+                    # 避免外层 check-then-act 竞态（unlock 与 lock 之间误锁刚解锁的 vault）
+                    rt.lock()
+                    # 审计（仅当确实执行了锁定时记录）
+                    if not rt.unlocked:
                         try:
                             from .audit import record as audit_record
                             from .models import AuditAction
                             audit_record(AuditAction.auth_auto_lock, "system",
                                          detail={"idle_seconds": int(elapsed)})
                         except Exception:
-                            pass
+                            logger.exception("auto-lock 审计记录失败")
             time.sleep(10)  # 每 10 秒检查一次
 
 

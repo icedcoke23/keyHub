@@ -43,9 +43,17 @@ class LatencyStats:
     def _compute_pct(self, samples: list[int]) -> tuple[float, float, float]:
         s = sorted(samples)
         n = len(s)
-        p50 = s[int(n * 0.5)]
-        p95 = s[int(n * 0.95)] if n > 1 else s[0]
-        p99 = s[int(n * 0.99)] if n > 1 else s[0]
+        if n == 0:
+            return 0.0, 0.0, 0.0
+        if n == 1:
+            return float(s[0]), float(s[0]), float(s[0])
+        # 钳制索引上界为 n-1，避免 int(n*p) >= n 时 IndexError
+        # p50 用标准中位数公式（偶数样本取中间两值平均）
+        mid_lo = (n - 1) // 2
+        mid_hi = n // 2
+        p50 = (s[mid_lo] + s[mid_hi]) / 2
+        p95 = s[min(int(n * 0.95), n - 1)]
+        p99 = s[min(int(n * 0.99), n - 1)]
         return float(p50), float(p95), float(p99)
 
     def _query_db(self, provider: str) -> tuple[float, float, float]:

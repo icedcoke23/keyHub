@@ -213,7 +213,10 @@ def chat(
     alias_mgr = get_alias_manager()
     provider, model = alias_mgr.resolve(provider, model)
 
-    cfg = get_provider(provider)
+    try:
+        cfg = get_provider(provider)
+    except ValueError:
+        raise LLMProxyError(f"未知的供应商 '{provider}'，请在控制台添加") from None
     if not cfg.base_url:
         raise LLMProxyError(f"provider '{provider}' has no base_url configured")
 
@@ -271,7 +274,7 @@ def chat(
                     current_provider = fallback_provider
                     current_cfg = get_provider(current_provider)
                     key = fallback_key
-                except NoAvailableKeyError:
+                except (NoAvailableKeyError, ValueError):
                     try:
                         from ..metrics import llm_requests_total
                         llm_requests_total.labels(provider=provider, model=model, status="fail").inc()
@@ -462,7 +465,10 @@ def chat_stream(
     alias_mgr = get_alias_manager()
     provider, model = alias_mgr.resolve(provider, model)
 
-    cfg = get_provider(provider)
+    try:
+        cfg = get_provider(provider)
+    except ValueError:
+        raise LLMProxyError(f"未知的供应商 '{provider}'，请在控制台添加") from None
     if not cfg.base_url:
         raise LLMProxyError(f"provider '{provider}' has no base_url configured")
 

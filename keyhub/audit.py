@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Any
 
@@ -13,6 +14,8 @@ from sqlalchemy import desc, select
 
 from .db import session_scope
 from .models import AuditAction, AuditLog
+
+logger = logging.getLogger(__name__)
 
 
 def record(
@@ -23,6 +26,8 @@ def record(
     detail: dict[str, Any] | None = None,
 ) -> None:
     """记录一条审计日志。失败不应抛异常（审计独立于业务）。"""
+    # 取一次时间戳，DB 记录与广播事件复用，保证两者一致
+    now = datetime.utcnow()
     entry_id = None
     try:
         with session_scope() as s:
@@ -32,13 +37,13 @@ def record(
                 target=target,
                 success=success,
                 detail=detail or {},
-                created_at=datetime.utcnow(),
+                created_at=now,
             )
             s.add(log)
             s.flush()
             entry_id = log.id
-    except Exception as e:  # noqa: BLE001
-        print(f"[audit] failed to record {action.value}: {e}", flush=True)
+    except Exception:  # noqa: BLE001
+        logger.exception("failed to record audit %s", action.value)
         return
 
     try:
@@ -50,11 +55,11 @@ def record(
             "target": target,
             "success": success,
             "detail": detail or {},
-            "created_at": datetime.utcnow().isoformat(),
+            "created_at": now.isoformat(),
         }
         get_broadcaster().broadcast(event)
-    except Exception as e:  # noqa: BLE001
-        print(f"[audit] failed to broadcast event: {e}", flush=True)
+    except Exception:  # noqa: BLE001
+        logger.exception("failed to broadcast audit event")
 
 
 def list_logs(
@@ -100,6 +105,6 @@ def cleanup_old_logs(retention_days: int) -> int:
                 delete(AuditLog).where(AuditLog.created_at < cutoff)
             )
             return result.rowcount or 0
-    except Exception as e:
-        print(f"[audit] cleanup failed: {e}", flush=True)
+    except Exception:
+        logger.exception("audit cleanup failed")
         return 0

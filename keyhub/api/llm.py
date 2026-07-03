@@ -188,7 +188,13 @@ def test_key(
         provider_name = llm_key.provider
         s.expunge(llm_key)
 
-    cfg = get_provider(provider_name)
+    try:
+        cfg = get_provider(provider_name)
+    except ValueError:
+        audit_record(AuditAction.llm_key_test, actor, target=key_id,
+                     success=False, detail={"reason": "unknown provider"})
+        return {"success": False, "latency_ms": 0,
+                "error": f"未知的供应商 '{provider_name}'", "models": None}
     if not cfg.base_url:
         audit_record(AuditAction.llm_key_test, actor, target=key_id,
                      success=False, detail={"reason": "no base_url"})

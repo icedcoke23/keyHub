@@ -117,7 +117,11 @@ def estimate_cost(provider: str, model: str, prompt_tokens: int, completion_toke
 
 
 def get_provider(name: str) -> ProviderConfig:
+    """获取供应商配置。未知供应商抛 ValueError，由调用方返回 502。
+
+    原实现返回 base_url="" 的空配置，httpx 会请求到 localhost 或抛错，
+    行为不可预期且可能将请求发到错误目标。
+    """
     if name not in PROVIDERS:
-        # 未知供应商默认按 OpenAI 兼容处理
-        return ProviderConfig(name=name, base_url="")
+        raise ValueError(f"unknown provider: {name!r}")
     return PROVIDERS[name]

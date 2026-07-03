@@ -216,7 +216,12 @@ def embeddings(body: dict[str, Any], actor: str = Depends(require_scope("llm:cha
     )
 
     try:
-        cfg = get_provider(provider)
+        try:
+            cfg = get_provider(provider)
+        except ValueError:
+            return _openai_error(
+                502, f"未知的供应商 '{provider}'", err_type="upstream_error",
+            )
         if not cfg.base_url:
             return _openai_error(
                 502,
@@ -230,7 +235,13 @@ def embeddings(body: dict[str, Any], actor: str = Depends(require_scope("llm:cha
             if settings.llm_enable_cross_provider_fallback:
                 try:
                     provider, key = balancer.pick_cross_provider(model, exclude_provider=initial_provider)
-                    cfg = get_provider(provider)
+                    try:
+                        cfg = get_provider(provider)
+                    except ValueError:
+                        balancer.release(key.id)
+                        return _openai_error(
+                            502, f"未知的供应商 '{provider}'", err_type="upstream_error",
+                        )
                     if not cfg.base_url:
                         balancer.release(key.id)
                         return _openai_error(
