@@ -34,20 +34,30 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
 def _client_ip(request: Request) -> str:
-    """获取真实客户端 IP，基于 trusted_proxy_depth 配置。
+    """获取真实客户端 IP，基于 trusted_proxy_depth + trusted_proxy_ips 配置。
 
-    与 auth.py 的 _client_ip 保持一致，避免限流误判：
+    防止伪造 XFF 绕过 IP 限流：
     - depth=0：完全不信任 XFF，用 request.client.host
-    - depth=N：取 XFF 倒数第 N 个 IP（即最接近本服务的可信反代前一跳）
-    避免伪造 XFF 导致所有用户被当成同一 IP 限流误锁。
+    - depth=N 且配置了 trusted_proxy_ips：仅当直连对端 IP 在白名单内才解析 XFF
+    - depth=N 且未配置白名单：仅按 depth 取 XFF 倒数第 N 跳（向后兼容）
     """
-    depth = get_settings().trusted_proxy_depth
+    settings = get_settings()
+    depth = settings.trusted_proxy_depth
+    peer = request.client.host if request.client else "unknown"
+
     if depth > 0:
+        # 若配置了反代 IP 白名单，先校验直连对端是否可信
+        whitelist_str = settings.trusted_proxy_ips
+        if whitelist_str:
+            whitelist = {ip.strip() for ip in whitelist_str.split(",") if ip.strip()}
+            if peer not in whitelist:
+                # 直连对端不在白名单，不信任 XFF，防伪造
+                return peer
         xff = request.headers.get("x-forwarded-for", "")
         parts = [p.strip() for p in xff.split(",") if p.strip()]
         if len(parts) >= depth:
             return parts[-depth]
-    return request.client.host if request.client else "unknown"
+    return peer
 
 
 @router.post("/init", response_model=MessageOut)

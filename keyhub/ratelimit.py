@@ -95,12 +95,16 @@ class LoginRateLimiter:
 
 # 单例
 _limiter: LoginRateLimiter | None = None
+_limiter_lock = threading.Lock()
 
 
 def get_limiter() -> LoginRateLimiter:
     global _limiter
+    # 双检锁，避免多线程并发首次调用各自创建实例导致限流状态分裂
     if _limiter is None:
-        _limiter = LoginRateLimiter()
+        with _limiter_lock:
+            if _limiter is None:
+                _limiter = LoginRateLimiter()
     return _limiter
 
 
@@ -139,9 +143,14 @@ class TokenRateLimiter:
 
 
 _token_limiter: TokenRateLimiter | None = None
+_token_limiter_lock = threading.Lock()
+
 
 def get_token_limiter() -> TokenRateLimiter:
     global _token_limiter
+    # 双检锁，与 get_limiter 一致
     if _token_limiter is None:
-        _token_limiter = TokenRateLimiter()
+        with _token_limiter_lock:
+            if _token_limiter is None:
+                _token_limiter = TokenRateLimiter()
     return _token_limiter

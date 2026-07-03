@@ -61,6 +61,10 @@ class Settings(BaseSettings):
     # 1 = 信任 1 层反代（取 XFF 倒数第 1 个 IP，即真实客户端）。
     # 部署在 Nginx/CDN 后建议设为对应层数。
     trusted_proxy_depth: int = 0
+    # 可信反代 IP 白名单（逗号分隔）。仅当 request.client.host 在白名单内时
+    # 才解析 XFF，防止直连/未知反代下伪造 XFF 绕过 IP 限流。
+    # 为空时仅按 trusted_proxy_depth 判断（向后兼容）。
+    trusted_proxy_ips: str = ""
     # API Token 速率限制（每分钟请求数，0 = 禁用）
     token_rpm_limit: int = 60
     # 每 Key RPM 限制（每分钟请求数，0 = 禁用）
