@@ -220,7 +220,8 @@ def chat(
     settings = get_settings()
     from .cache import get_cache
     cache = get_cache()
-    cached = cache.get(provider, model, messages, temperature, settings.llm_cache_ttl)
+    cached = cache.get(provider, model, messages, temperature, settings.llm_cache_ttl,
+                       max_tokens=max_tokens, extra=extra)
     if cached is not None:
         try:
             from ..metrics import llm_cache_hits
@@ -429,7 +430,8 @@ def chat(
             get_latency_stats().record(current_provider, latency_ms)
         except Exception:
             pass
-        cache.set(current_provider, model, messages, temperature, resp_json)
+        cache.set(current_provider, model, messages, temperature, resp_json,
+                  max_tokens=max_tokens, extra=extra)
         _release_semaphore()
         return resp_json
 
@@ -638,7 +640,10 @@ def chat_stream(
                                         break
                                     u = _extract_stream_usage(current_cfg, chunk_json)
                                     if u:
-                                        prompt_tokens, completion_tokens = u
+                                        # 累加（Anthropic 分 message_start/message_delta
+                                        # 两个事件分别上报 input/output tokens）
+                                        prompt_tokens += u[0]
+                                        completion_tokens += u[1]
                                 except json.JSONDecodeError:
                                     pass
                                 except Exception:
@@ -751,11 +756,12 @@ def _extract_stream_usage(cfg, chunk_json: dict) -> tuple[int, int] | None:
         return None
     if cfg.name == "anthropic":
         if chunk_json.get("type") == "message_delta":
-            u = chunk_json.get("usage", {})
-            return None, int(u.get("output_tokens", 0))
+            u = chunk_json.get("usage", {}) or {}
+            # 返回 (0, output_tokens)；prompt 侧用 0 占位，由调用方累加
+            return 0, int(u.get("output_tokens", 0))
         if chunk_json.get("type") == "message_start":
-            msg = chunk_json.get("message", {})
-            u = msg.get("usage", {})
+            msg = chunk_json.get("message", {}) or {}
+            u = msg.get("usage", {}) or {}
             return int(u.get("input_tokens", 0)), 0
         return None
     return None

@@ -52,7 +52,23 @@ _FULL_BACKUP_MEMORY_COST = 65536
 _FULL_BACKUP_PARALLELISM = 4
 
 
-def export_backup(output_path: str, backup_password: str) -> dict[str, Any]:
+def _decrypt_with_aad_fallback(rt, cred: Credential) -> str:
+    """解密凭证值，兼容带 AAD（v1+）与不带 AAD（旧版）两种格式。
+
+    新格式凭证加密时绑定 AAD = f"{id}:{name}"；旧版可能未绑定。
+    通过 Runtime.decrypt 走读锁，避免与 lock/change_password 竞争。
+    """
+    aad = f"{cred.id}:{cred.name}".encode("utf-8")
+    try:
+        return rt.decrypt(cred.encrypted_value, aad=aad)
+    except Exception:
+        try:
+            return rt.decrypt(cred.encrypted_value, aad=None)
+        except Exception:
+            return rt.decrypt(cred.encrypted_value)
+
+
+def export_backup(output_path: str, backup_password: str, *, actor: str = "master") -> dict[str, Any]:
     """导出所有凭证到加密备份文件。返回统计信息。"""
     rt = get_runtime()
     if not rt.unlocked:
@@ -65,7 +81,7 @@ def export_backup(output_path: str, backup_password: str) -> dict[str, Any]:
             select(Credential).where(Credential.deleted == False)  # noqa: E712
         ).scalars().all()
         for c in creds:
-            plaintext = rt.vault.decrypt(c.encrypted_value)
+            plaintext = _decrypt_with_aad_fallback(rt, c)
             item = {
                 "name": c.name,
                 "type": c.type.value,
@@ -112,13 +128,14 @@ def export_backup(output_path: str, backup_password: str) -> dict[str, Any]:
     # 审计
     from .audit import record as audit_record
     from .models import AuditAction
-    audit_record(AuditAction.backup_export, "master",
+    audit_record(AuditAction.backup_export, actor,
                  detail={"count": len(items), "path": output_path})
 
     return {"count": len(items), "path": output_path}
 
 
-def import_backup(input_path: str, backup_password: str, *, overwrite: bool = False) -> dict[str, Any]:
+def import_backup(input_path: str, backup_password: str, *, overwrite: bool = False,
+                  actor: str = "master") -> dict[str, Any]:
     """从加密备份文件导入凭证。返回统计信息。"""
     rt = get_runtime()
     if not rt.unlocked:
@@ -200,7 +217,7 @@ def import_backup(input_path: str, backup_password: str, *, overwrite: bool = Fa
     # 审计
     from .audit import record as audit_record
     from .models import AuditAction
-    audit_record(AuditAction.backup_import, "master",
+    audit_record(AuditAction.backup_import, actor,
                  detail={"path": input_path, "imported": imported,
                          "skipped": skipped, "overwritten": overwritten})
 
@@ -225,7 +242,7 @@ def _derive_full_backup_key(password: str, salt: bytes) -> bytes:
     )
 
 
-def export_encrypted_backup(password: str) -> bytes:
+def export_encrypted_backup(password: str, *, actor: str = "master") -> bytes:
     """导出整个数据库为加密的二进制格式。
 
     格式：magic=b"KHBK01" || salt(16) || nonce(12) || ciphertext(zlib压缩的SQLite数据)
@@ -255,13 +272,13 @@ def export_encrypted_backup(password: str) -> bytes:
 
     from .audit import record as audit_record
     from .models import AuditAction
-    audit_record(AuditAction.backup_export, "master",
+    audit_record(AuditAction.backup_export, actor,
                  detail={"type": "full_encrypted", "size": len(result)})
 
     return result
 
 
-def import_encrypted_backup(data: bytes, password: str) -> int:
+def import_encrypted_backup(data: bytes, password: str, *, actor: str = "master") -> int:
     """从加密备份恢复，返回恢复的凭证数。"""
     rt = get_runtime()
     if not rt.unlocked:
@@ -320,7 +337,7 @@ def import_encrypted_backup(data: bytes, password: str) -> int:
 
     from .audit import record as audit_record
     from .models import AuditAction
-    audit_record(AuditAction.backup_import, "master",
+    audit_record(AuditAction.backup_import, actor,
                  detail={"type": "full_encrypted", "credentials_count": cred_count})
 
     return cred_count

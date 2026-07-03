@@ -47,15 +47,24 @@ class LoginRateLimiter:
         return time.monotonic()
 
     def is_locked(self, ip: str) -> tuple[bool, int]:
-        """返回 (是否锁定, 剩余秒数)。"""
+        """返回 (是否锁定, 剩余秒数)。
+
+        锁定到期后重置失败计数，给用户在新周期内重新尝试的机会，
+        避免失败计数只增不减导致指数退避永久升级（一旦被触发几次失败，
+        即使等过锁定期，再失败一次又会把锁翻倍，最终 3600s 封顶无法登录）。
+        """
         with self._lock:
             st = self._state.get(ip)
             if st is None:
                 return False, 0
-            if st.locked_until <= self._now():
-                return False, 0
-            remaining = int(st.locked_until - self._now())
-            return True, max(remaining, 0)
+            now = self._now()
+            if st.locked_until > now:
+                return True, max(int(st.locked_until - now), 0)
+            # 锁已过期（或从未锁定）：若曾被锁定过，重置计数
+            if st.locked_until > 0 and st.fails >= self.max_fails:
+                st.fails = 0
+                st.locked_until = 0.0
+            return False, 0
 
     def record_failure(self, ip: str) -> tuple[bool, int]:
         """记录一次失败。返回 (是否触发锁定, 锁定秒数)。"""

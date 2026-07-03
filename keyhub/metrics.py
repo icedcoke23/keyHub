@@ -7,6 +7,8 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 from fastapi.responses import Response
 
+from .auth import require_scope
+
 try:
     from prometheus_client import (
         Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST,
@@ -75,8 +77,13 @@ if _HAS_PROM:
 
 
 @router.get("/metrics")
-def metrics():
-    """Prometheus 指标端点。"""
+def metrics(_: str = Depends(require_scope("metrics:read"))):
+    """Prometheus 指标端点。
+
+    需认证（metrics:read scope）：指标含凭证数量、活跃 key 数、按 provider/model
+    的用量与成本等元数据，对密钥保险库而言属于高价值侦察信息，不应公开暴露。
+    Prometheus 抓取时需配置 Bearer Token（具有 metrics:read scope）。
+    """
     if not _HAS_PROM:
         return Response(content="# prometheus_client not installed\n", media_type="text/plain")
     return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)

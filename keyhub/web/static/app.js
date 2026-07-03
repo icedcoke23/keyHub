@@ -20,6 +20,8 @@ async function api(path, opts = {}) {
     }
     throw new Error('会话已过期，请重新解锁');
   }
+  // 收到非 401 响应说明会话有效，重置标志位以允许后续再次触发跳转逻辑
+  _handling401 = false;
   if (!res.ok) {
     let msg = res.statusText || `HTTP ${res.status}`;
     try { msg = (await res.json()).detail || msg; } catch {}
@@ -94,6 +96,9 @@ window.initSubmit = async function () {
 
 // ===== 解锁页 =====
 window.unlockSubmit = async function () {
+  // 防止重复提交（Enter / 双击按钮），避免失败计数被双倍累加
+  const btn = el('submit-btn');
+  if (btn && btn.disabled) return;
   err('err', '');
   try {
     await withLoading('submit-btn', () => postJSON('/api/auth/unlock', { password: el('pw').value }));
@@ -257,7 +262,7 @@ window.rotate = async function (name) {
   if (nv === null) return;
   if (!nv) { toast('新值不能为空', 'error'); return; }
   try {
-    await api(`/api/credentials/${encodeURIComponent(name)}/rotate?new_value=${encodeURIComponent(nv)}`, { method: 'POST' });
+    await postJSON(`/api/credentials/${encodeURIComponent(name)}/rotate`, { new_value: nv });
     toast(`${name} 已轮换`, 'success');
     loadCreds();
   } catch (e) { toast(e.message, 'error'); }
@@ -742,8 +747,8 @@ function appendAuditEntry(x) {
   }
   const loading = list.querySelector('.loading');
   if (loading) return;
-  const time = x.created_at?.replace('T', ' ').slice(0, 19) || '-';
-  const detailStr = x.detail ? Object.entries(x.detail).map(([k, v]) => `${k}=${esc(String(v))}`).join(' ') : '';
+  const time = esc(x.created_at?.replace('T', ' ').slice(0, 19) || '-');
+  const detailStr = x.detail ? Object.entries(x.detail).map(([k, v]) => `${esc(k)}=${esc(String(v))}`).join(' ') : '';
   const item = document.createElement('div');
   item.className = 'audit-item';
   item.style.animation = 'fadeInUp 0.3s ease';
@@ -797,8 +802,8 @@ async function loadAudit() {
       el('audit-list').innerHTML = '<div class="empty-state" style="padding:28px"><div class="empty-state-icon">📋</div><div class="empty-state-text">暂无审计记录</div></div>';
     } else {
       el('audit-list').innerHTML = list.map(x => {
-        const time = x.created_at?.replace('T', ' ').slice(0, 19) || '-';
-        const detailStr = x.detail ? Object.entries(x.detail).map(([k, v]) => `${k}=${esc(String(v))}`).join(' ') : '';
+        const time = esc(x.created_at?.replace('T', ' ').slice(0, 19) || '-');
+        const detailStr = x.detail ? Object.entries(x.detail).map(([k, v]) => `${esc(k)}=${esc(String(v))}`).join(' ') : '';
         return `<div class="audit-item">
           <span class="audit-time">${time}</span>
           <span class="audit-action ${x.success ? '' : 'failed'}">${esc(x.action)}</span>

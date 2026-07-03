@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import io
+import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -16,6 +17,7 @@ from ..schemas import (
     CredentialSecret,
     CredentialUpdate,
     MessageOut,
+    RotateRequest,
     RotationLogOut,
 )
 from ..store import (
@@ -34,6 +36,11 @@ from ..audit import record as audit_record
 from ..importers import import_bitwarden_json, import_keepass_csv
 
 router = APIRouter(prefix="/api/credentials", tags=["credentials"])
+
+logger = logging.getLogger(__name__)
+
+# 单次导入数量上限，防止 DoS 与误操作
+MAX_IMPORT_ITEMS = 5000
 
 
 @router.post("", response_model=CredentialOut)
@@ -82,6 +89,8 @@ def import_credentials(
         if not isinstance(body, list):
             raise HTTPException(400, "json format expects a list of credential items")
         items = body
+        if len(items) > MAX_IMPORT_ITEMS:
+            raise HTTPException(413, f"too many items: {len(items)} (max {MAX_IMPORT_ITEMS})")
     elif format == "bitwarden":
         if isinstance(body, dict) and "items" in body:
             items_data = body["items"]
@@ -93,6 +102,8 @@ def import_credentials(
             creds_to_import = import_bitwarden_json(items_data)
         except Exception as e:
             raise HTTPException(400, f"failed to parse bitwarden data: {e}")
+        if len(creds_to_import) > MAX_IMPORT_ITEMS:
+            raise HTTPException(413, f"too many items: {len(creds_to_import)} (max {MAX_IMPORT_ITEMS})")
         for data in creds_to_import:
             try:
                 create_credential(data, actor=actor)
@@ -103,7 +114,8 @@ def import_credentials(
                 else:
                     results["errors"].append({"name": data.name, "error": str(e)})
             except Exception as e:
-                results["errors"].append({"name": data.name, "error": str(e)})
+                logger.exception("import bitwarden item %r failed", data.name)
+                results["errors"].append({"name": data.name, "error": "internal error"})
         audit_record(AuditAction.credential_import, actor, detail={**results, "format": format})
         return results
     elif format == "keepass_csv":
@@ -114,6 +126,8 @@ def import_credentials(
             creds_to_import = import_keepass_csv(csv_data)
         except Exception as e:
             raise HTTPException(400, f"failed to parse CSV data: {e}")
+        if len(creds_to_import) > MAX_IMPORT_ITEMS:
+            raise HTTPException(413, f"too many items: {len(creds_to_import)} (max {MAX_IMPORT_ITEMS})")
         for data in creds_to_import:
             try:
                 create_credential(data, actor=actor)
@@ -124,7 +138,8 @@ def import_credentials(
                 else:
                     results["errors"].append({"name": data.name, "error": str(e)})
             except Exception as e:
-                results["errors"].append({"name": data.name, "error": str(e)})
+                logger.exception("import keepass item %r failed", data.name)
+                results["errors"].append({"name": data.name, "error": "internal error"})
         audit_record(AuditAction.credential_import, actor, detail={**results, "format": format})
         return results
     else:
@@ -141,7 +156,8 @@ def import_credentials(
             else:
                 results["errors"].append({"name": item.get("name", "?"), "error": str(e)})
         except Exception as e:
-            results["errors"].append({"name": item.get("name", "?"), "error": str(e)})
+            logger.exception("import json item %r failed", item.get("name", "?"))
+            results["errors"].append({"name": item.get("name", "?"), "error": "internal error"})
     audit_record(AuditAction.credential_import, actor, detail={**results, "format": format})
     return results
 
@@ -242,12 +258,12 @@ def update(name: str, body: CredentialUpdate, actor: str = Depends(require_scope
 @router.post("/{name}/rotate", response_model=CredentialOut)
 def rotate(
     name: str,
-    new_value: str = Query(..., description="new plaintext value"),
-    note: str | None = Query(None),
+    body: RotateRequest,
     actor: str = Depends(require_scope("credentials:write")),
 ):
+    """轮换凭证值。明文经请求体传输，避免出现在 URL/访问日志中。"""
     try:
-        return rotate_credential(name, new_value, note, actor=actor)
+        return rotate_credential(name, body.new_value, body.note, actor=actor)
     except KeyError:
         raise HTTPException(404, f"credential '{name}' not found")
 
@@ -262,11 +278,15 @@ def delete(name: str, actor: str = Depends(require_scope("credentials:write"))):
 
 
 @router.get("/{name}/health")
-def health_check(name: str, _: str = Depends(require_scope("credentials:read"))):
+def health_check(name: str, actor: str = Depends(require_scope("credentials:reveal"))):
+    """凭证健康检查：密码强度 + 跨凭证重复检测。
+
+    需 reveal 权限，因为重复检测会 reveal 其他凭证的明文用于比对。
+    """
     from ..store import reveal_credential as _reveal, list_credentials as _list
     from ..crypto import password_strength
     try:
-        secret = _reveal(name, actor="health-check")
+        secret = _reveal(name, actor=actor)
     except KeyError:
         raise HTTPException(404, f"credential '{name}' not found")
     strength = password_strength(secret.value)
@@ -276,7 +296,7 @@ def health_check(name: str, _: str = Depends(require_scope("credentials:read")))
         if c.name == name:
             continue
         try:
-            other = _reveal(c.name, actor="health-check")
+            other = _reveal(c.name, actor=actor)
             if other.value == secret.value:
                 duplicates.append(c.name)
         except Exception:

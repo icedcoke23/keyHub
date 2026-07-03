@@ -167,10 +167,21 @@ class Notifier:
             msg["To"] = settings.notify_email_to
             msg["Date"] = formatdate(localtime=True)
 
-            with smtplib.SMTP(settings.notify_email_smtp_host,
-                              settings.notify_email_smtp_port, timeout=10) as smtp:
+            port = settings.notify_email_smtp_port
+            # 465 = SMTPS（隐式 TLS），必须用 SMTP_SSL；
+            # 587/其他非 25 = STARTTLS 升级；25 = 明文（可选升级）。
+            if port == 465:
+                ctx = smtplib.ssl.create_default_context()
+                smtp = smtplib.SMTP_SSL(settings.notify_email_smtp_host, port,
+                                        timeout=10, context=ctx)
+            else:
+                smtp = smtplib.SMTP(settings.notify_email_smtp_host, port, timeout=10)
+            try:
                 smtp.ehlo()
-                if settings.notify_email_smtp_port != 25:
+                if port != 465 and port != 25:
+                    smtp.starttls()
+                    smtp.ehlo()
+                elif port == 25 and smtp.has_extn("starttls"):
                     smtp.starttls()
                     smtp.ehlo()
                 if settings.notify_email_smtp_user:
@@ -178,6 +189,8 @@ class Notifier:
                                settings.notify_email_smtp_password)
                 recipients = [a.strip() for a in settings.notify_email_to.split(",") if a.strip()]
                 smtp.sendmail(settings.notify_email_from, recipients, msg.as_string())
+            finally:
+                smtp.quit()
         except Exception as e:  # noqa: BLE001
             print(f"[notify] email failed: {e}", flush=True)
 

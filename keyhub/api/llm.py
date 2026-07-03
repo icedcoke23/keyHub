@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 
 import httpx
@@ -23,6 +24,8 @@ from ..models import AuditAction, Credential, LLMKey, LLMKeyStatus
 from ..schemas import LLMChatRequest, LLMKeySummary, MessageOut, UsageOut
 
 router = APIRouter(prefix="/api/llm", tags=["llm"])
+
+logger = logging.getLogger(__name__)
 
 
 @router.post("/chat")
@@ -60,6 +63,9 @@ def chat_endpoint(body: LLMChatRequest, actor: str = Depends(require_scope("llm:
         )
     except LLMProxyError as e:
         raise HTTPException(502, str(e))
+    except Exception:
+        logger.exception("llm chat internal error")
+        raise HTTPException(500, "internal error")
 
 
 @router.get("/keys", response_model=list[LLMKeySummary])
@@ -74,7 +80,7 @@ def list_keys(
 def set_key_status(
     key_id: str,
     status: LLMKeyStatus = Query(...),
-    _: str = Depends(require_scope("llm:write")),
+    actor: str = Depends(require_scope("llm:write")),
 ):
     """手动启用/停用某个 key。"""
     get_balancer()
@@ -87,6 +93,8 @@ def set_key_status(
         k.status = status
         if status == LLMKeyStatus.active:
             k.cooldown_until = None
+    audit_record(AuditAction.llm_key_status, actor, target=key_id,
+                 detail={"status": status.value})
     return MessageOut(message=f"status set to {status}")
 
 
@@ -151,17 +159,18 @@ def cache_stats(_: str = Depends(require_scope("llm:read"))):
 
 
 @router.post("/cache/clear", response_model=MessageOut)
-def cache_clear(_: str = Depends(require_scope("llm:write"))):
+def cache_clear(actor: str = Depends(require_scope("llm:write"))):
     """清空响应缓存。"""
     from ..llm.cache import get_cache
     n = get_cache().clear()
+    audit_record(AuditAction.llm_cache_clear, actor, detail={"cleared": n})
     return MessageOut(message=f"cleared {n} cache entries")
 
 
 @router.post("/keys/{key_id}/test")
 def test_key(
     key_id: str,
-    _: str = Depends(require_scope("llm:read")),
+    actor: str = Depends(require_scope("llm:read")),
 ):
     """测试指定 Key 的连通性：解密后请求上游 models 端点，测量延迟。"""
     settings = get_settings()
@@ -181,6 +190,8 @@ def test_key(
 
     cfg = get_provider(provider_name)
     if not cfg.base_url:
+        audit_record(AuditAction.llm_key_test, actor, target=key_id,
+                     success=False, detail={"reason": "no base_url"})
         return {"success": False, "latency_ms": 0, "error": f"provider '{provider_name}' has no base_url configured", "models": None}
 
     api_key = _decrypt_key(llm_key.id, enc_value, cred_name or key_id)
@@ -214,7 +225,8 @@ def test_key(
         latency_ms = int((time.monotonic() - t0) * 1000)
 
         if r.status_code >= 400:
-            error_msg = f"upstream {r.status_code}: {r.text[:200]}"
+            # 不向上回显上游响应体（可能含敏感信息），仅返回状态码
+            error_msg = f"upstream returned {r.status_code}"
         else:
             try:
                 resp_json = r.json()
@@ -226,15 +238,18 @@ def test_key(
             except Exception:
                 models = []
             success = True
-    except (httpx.RequestError, ValueError) as e:
+    except (httpx.RequestError, ValueError):
         latency_ms = int((time.monotonic() - t0) * 1000)
-        error_msg = str(e)
+        logger.exception("llm key %s connectivity test failed", key_id)
+        error_msg = "network or connection error"
 
     if success:
         balancer.mark_ok(key_id, latency_ms)
     else:
         balancer.mark_error(key_id)
 
+    audit_record(AuditAction.llm_key_test, actor, target=key_id,
+                 success=success, detail={"latency_ms": latency_ms})
     return {
         "success": success,
         "latency_ms": latency_ms,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import desc, func, select
+from sqlalchemy import desc, func, select, update
 
 from ..db import session_scope
 from ..models import LLMKey, UsageLog
@@ -36,13 +36,19 @@ def record_usage(
             error=error,
             created_at=now,
         ))
-        # 增量更新汇总
-        key = s.get(LLMKey, llm_key_id)
-        if key:
-            key.total_requests += 1
-            key.total_prompt_tokens += prompt_tokens
-            key.total_completion_tokens += completion_tokens
-            key.estimated_cost_usd = round(key.estimated_cost_usd + cost_usd, 6)
+        # 原子增量更新：用 SQL 表达式避免并发 read-modify-write 丢失更新。
+        # SQLite 单写者模型保证单条 UPDATE 串行执行，但「读出→+=→写回」
+        # 在两个并发事务中会各自读到旧值导致计数偏低。
+        s.execute(
+            update(LLMKey)
+            .where(LLMKey.id == llm_key_id)
+            .values(
+                total_requests=LLMKey.total_requests + 1,
+                total_prompt_tokens=LLMKey.total_prompt_tokens + prompt_tokens,
+                total_completion_tokens=LLMKey.total_completion_tokens + completion_tokens,
+                estimated_cost_usd=func.round(LLMKey.estimated_cost_usd + cost_usd, 6),
+            )
+        )
 
 
 def list_usage(limit: int = 100, provider: str | None = None) -> list[UsageOut]:

@@ -15,15 +15,18 @@ class ResponseCache:
             cls._instance._store = OrderedDict()  # key -> (response, expire_at)
         return cls._instance
 
-    def _make_key(self, provider, model, messages, temperature) -> str:
-        # sha256 前 16 位
-        raw = f"{provider}|{model}|{temperature}|{repr(messages)}"
+    def _make_key(self, provider, model, messages, temperature,
+                  max_tokens=None, extra=None) -> str:
+        # sha256 前 16 位。max_tokens/extra 影响输出，必须纳入 key，
+        # 否则不同 max_tokens/extra 的请求会命中同一缓存返回错误结果。
+        raw = f"{provider}|{model}|{temperature}|{max_tokens}|{repr(extra)}|{repr(messages)}"
         return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
-    def get(self, provider, model, messages, temperature, ttl):
+    def get(self, provider, model, messages, temperature, ttl,
+            max_tokens=None, extra=None):
         if ttl <= 0:
             return None
-        key = self._make_key(provider, model, messages, temperature)
+        key = self._make_key(provider, model, messages, temperature, max_tokens, extra)
         item = self._store.get(key)
         if item is None:
             return None
@@ -35,12 +38,13 @@ class ResponseCache:
         self._store.move_to_end(key)
         return resp
 
-    def set(self, provider, model, messages, temperature, response):
+    def set(self, provider, model, messages, temperature, response,
+            max_tokens=None, extra=None):
         from ..config import get_settings
         ttl = get_settings().llm_cache_ttl
         if ttl <= 0:
             return
-        key = self._make_key(provider, model, messages, temperature)
+        key = self._make_key(provider, model, messages, temperature, max_tokens, extra)
         self._store[key] = (response, time.time() + ttl)
         self._store.move_to_end(key)
         # 容量控制

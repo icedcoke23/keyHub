@@ -7,7 +7,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
-from .models import CredentialType, LLMKeyStatus
+from .models import CredentialType, LLMKeyStatus, DEFAULT_TOKEN_SCOPES
 
 
 # ===== 凭证 =====
@@ -129,9 +129,20 @@ class ChangePasswordRequest(BaseModel):
     new_password: str = Field(..., min_length=8)
 
 
+class RotateRequest(BaseModel):
+    """凭证轮换请求体（避免明文经 URL Query 传输）。"""
+    new_value: str = Field(..., min_length=1)
+    note: str | None = None
+
+
+# Token 默认 scope 从 models.py 导入（最小权限原则，仅只读）
+# re-export 以兼容外部 `from .schemas import DEFAULT_TOKEN_SCOPES` 用法
+__all__ = ["DEFAULT_TOKEN_SCOPES"]
+
+
 class TokenCreate(BaseModel):
     name: str
-    scopes: list[str] = Field(default_factory=lambda: ["*"])
+    scopes: list[str] = Field(default_factory=lambda: list(DEFAULT_TOKEN_SCOPES))
     expires_in_hours: int | None = None
 
 

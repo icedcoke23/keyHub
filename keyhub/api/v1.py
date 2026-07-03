@@ -16,6 +16,7 @@ KeyHub：只需把 base_url 指向 KeyHub 的 /v1 前缀，并以 KeyHub API Tok
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 import httpx
@@ -24,17 +25,19 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from sqlalchemy import select
 
 from ..audit import record as audit_record
-from ..auth import require_auth
+from ..auth import require_scope
 from ..config import get_settings
 from ..db import session_scope
 from ..llm.aliases import get_alias_manager
 from ..llm.balancer import NoAvailableKeyError, get_balancer
-from ..llm.proxy import LLMProxyError, chat, chat_stream
+from ..llm.proxy import LLMProxyError, _friendly_error, chat, chat_stream
 from ..llm.providers import PRICING, get_provider
 from ..models import AuditAction, Credential, LLMKey
 from ..runtime import get_runtime
 
 router = APIRouter(prefix="/v1", tags=["openai-compatible"])
+
+logger = logging.getLogger(__name__)
 
 # chat_stream 保留字段：这些字段会被显式提取并传给 chat()/chat_stream()，
 # 不会进入 extra。其余 OpenAI 字段（tools / functions / tool_choice /
@@ -77,7 +80,7 @@ def _openai_error(
 
 
 @router.post("/chat/completions")
-def chat_completions(body: dict[str, Any], actor: str = Depends(require_auth)):
+def chat_completions(body: dict[str, Any], actor: str = Depends(require_scope("llm:chat"))):
     """OpenAI 兼容的聊天补全端点。
 
     请求体为 OpenAI 格式 dict；可选 keyhub_provider 字段显式指定供应商，
@@ -122,8 +125,9 @@ def chat_completions(body: dict[str, Any], actor: str = Depends(require_auth)):
             except LLMProxyError as e:
                 payload = {"error": {"message": str(e), "type": "upstream_error", "code": None}}
                 yield f"data: {json.dumps(payload)}\n\n".encode("utf-8")
-            except Exception as e:  # noqa: BLE001
-                payload = {"error": {"message": str(e), "type": "internal_error", "code": None}}
+            except Exception:  # noqa: BLE001
+                logger.exception("streaming chat internal error")
+                payload = {"error": {"message": "internal error", "type": "internal_error", "code": None}}
                 yield f"data: {json.dumps(payload)}\n\n".encode("utf-8")
 
         audit_record(
@@ -151,12 +155,13 @@ def chat_completions(body: dict[str, Any], actor: str = Depends(require_auth)):
         )
     except LLMProxyError as e:
         return _openai_error(502, str(e), err_type="upstream_error")
-    except Exception as e:  # noqa: BLE001
-        return _openai_error(500, str(e), err_type="internal_error")
+    except Exception:  # noqa: BLE001
+        logger.exception("chat completions internal error")
+        return _openai_error(500, "internal error", err_type="internal_error")
 
 
 @router.get("/models")
-def list_models(actor: str = Depends(require_auth)):
+def list_models(actor: str = Depends(require_scope("llm:read"))):
     """聚合已配置 LLM Key 的可用模型，返回 OpenAI 风格的列表。
 
     某 key 配置了 allowed_models → 列出这些模型；
@@ -181,7 +186,7 @@ def list_models(actor: str = Depends(require_auth)):
 
 
 @router.post("/embeddings")
-def embeddings(body: dict[str, Any], actor: str = Depends(require_auth)):
+def embeddings(body: dict[str, Any], actor: str = Depends(require_scope("llm:chat"))):
     """OpenAI 兼容的文本向量端点。
 
     从 model 名推断 provider，选 key、解密后直接调用上游 /v1/embeddings，
@@ -281,7 +286,8 @@ def embeddings(body: dict[str, Any], actor: str = Depends(require_auth)):
                     r = client.post(url, headers=headers, json=req_body)
             except httpx.RequestError as e:
                 balancer.mark_error(key.id)
-                return _openai_error(502, str(e), err_type="upstream_error")
+                logger.exception("embeddings upstream request failed")
+                return _openai_error(502, _friendly_error(e), err_type="upstream_error")
 
             if r.status_code == 429:
                 from ..llm.balancer import _parse_retry_after
@@ -300,5 +306,6 @@ def embeddings(body: dict[str, Any], actor: str = Depends(require_auth)):
         except Exception:
             balancer.release(key.id)
             raise
-    except Exception as e:  # noqa: BLE001
-        return _openai_error(500, str(e), err_type="internal_error")
+    except Exception:  # noqa: BLE001
+        logger.exception("embeddings internal error")
+        return _openai_error(500, "internal error", err_type="internal_error")

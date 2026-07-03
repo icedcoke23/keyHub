@@ -140,7 +140,11 @@ class KeyBalancer:
                 self._inflight[key_id] = 0
 
     def _cleanup(self, now_ts: float) -> None:
-        """清理过期的熔断器状态。"""
+        """清理过期的熔断器状态，并将已治愈的 key 在 DB 中重置为 active。
+
+        否则 key 会永久停留在 circuit_breaker 状态（内存熔断器已过期，
+        但 DB status 未更新），导致 self-heal 失效、key 再也不被选中。
+        """
         with self._state_lock:
             expired = [
                 k for k, v in self._cb_open_until.items()
@@ -150,6 +154,18 @@ class KeyBalancer:
                 self._fail_counts.pop(k, None)
                 self._cb_open_until.pop(k, None)
                 self._half_open.pop(k, None)
+        # 锁外重置 DB 状态为 active，让 self-heal 真正生效
+        if expired:
+            try:
+                with session_scope() as s:
+                    s.execute(
+                        update(LLMKey)
+                        .where(LLMKey.id.in_(expired))
+                        .where(LLMKey.status == LLMKeyStatus.circuit_breaker)
+                        .values(status=LLMKeyStatus.active, cooldown_until=None)
+                    )
+            except Exception:
+                pass
 
     def _query_active_keys(self, provider: Optional[str], model: Optional[str] = None) -> list[LLMKey]:
         now = datetime.utcnow()

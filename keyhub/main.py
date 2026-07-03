@@ -107,6 +107,17 @@ def create_app() -> FastAPI:
         from .web import mount_web_ui
         mount_web_ui(app)
 
+    # 安全响应头中间件（合并时丢失，重新引入）
+    @app.middleware("http")
+    async def security_headers(request, call_next):
+        response = await call_next(request)
+        # 仅对浏览器可访问的资源（HTML/JS/CSS）附加安全头，避免影响 API/SSE
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+        response.headers.setdefault("X-XSS-Protection", "1; mode=block")
+        return response
+
     return app
 
 

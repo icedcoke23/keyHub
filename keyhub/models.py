@@ -216,6 +216,11 @@ class RotationLog(Base):
 
 # ===== API Token（程序化访问） =====
 
+# Token 默认 scope：最小权限原则，仅只读。
+# 定义在 models.py（底层模块）以避免与 schemas.py 循环导入。
+DEFAULT_TOKEN_SCOPES: list[str] = ["credentials:read", "llm:read"]
+
+
 class APIToken(Base):
     __tablename__ = "api_tokens"
 
@@ -223,7 +228,7 @@ class APIToken(Base):
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     # token_hash = sha256(token) 的 hex，明文 token 仅在创建时返回一次
     token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
-    scopes: Mapped[list] = mapped_column(JSON, default=lambda: ["*"])  # ["credentials:read", ...]
+    scopes: Mapped[list] = mapped_column(JSON, default=lambda: list(DEFAULT_TOKEN_SCOPES))  # ["credentials:read", ...]
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -259,7 +264,11 @@ class AuditAction(str, enum.Enum):
     llm_proxy_call = "llm.proxy_call"
     llm_budget_exceeded = "llm.budget_exceeded"
     llm_cache_hit = "llm.cache_hit"
+    llm_cache_clear = "llm.cache_clear"
+    llm_key_status = "llm.key_status"
+    llm_key_test = "llm.key_test"
     auth_auto_lock = "auth.auto_lock"
+    system_notify_test = "system.notify_test"
 
 
 class AuditLog(Base):

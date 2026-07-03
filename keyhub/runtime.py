@@ -11,8 +11,9 @@ from __future__ import annotations
 
 import json
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Optional
+from typing import Iterator, Optional
 
 from sqlalchemy import select
 
@@ -27,6 +28,46 @@ from .crypto import (
 )
 from .db import session_scope
 from .models import KVStore
+
+
+class _RWLock:
+    """简易读写锁：允许多个并发读，写互斥且等待所有读完成。
+
+    用于保护运行时 vault：encrypt/decrypt 取读锁，lock/change_password/
+    unlock/initialize 取写锁，避免 vault 在被读取时被 zero()/替换。
+    """
+
+    def __init__(self) -> None:
+        self._readers = 0
+        self._writers = 0
+        self._cond = threading.Condition()
+
+    @contextmanager
+    def read(self) -> Iterator[None]:
+        with self._cond:
+            while self._writers > 0:
+                self._cond.wait()
+            self._readers += 1
+        try:
+            yield
+        finally:
+            with self._cond:
+                self._readers -= 1
+                if self._readers == 0:
+                    self._cond.notify_all()
+
+    @contextmanager
+    def write(self) -> Iterator[None]:
+        with self._cond:
+            while self._writers > 0 or self._readers > 0:
+                self._cond.wait()
+            self._writers += 1
+        try:
+            yield
+        finally:
+            with self._cond:
+                self._writers -= 1
+                self._cond.notify_all()
 
 
 # KVStore 中的键名
@@ -51,6 +92,7 @@ class Runtime:
                 cls._instance = super().__new__(cls)
                 cls._instance._vault = None  # type: ignore[attr-defined]
                 cls._instance._initialized = None  # type: ignore[attr-defined]
+                cls._instance._rw_lock = _RWLock()  # type: ignore[attr-defined]
         return cls._instance
 
     # ===== 初始化状态 =====
@@ -70,6 +112,18 @@ class Runtime:
             locked=self._vault is None,
         )
 
+    # ===== 加解密（读锁保护，避免与 lock/change_password 竞争）=====
+
+    def encrypt(self, plaintext: str | bytes, aad: bytes | None = None) -> bytes:
+        """线程安全的加密（取读锁）。"""
+        with self._rw_lock.read():
+            return self.vault.encrypt(plaintext, aad=aad)
+
+    def decrypt(self, blob: bytes, aad: bytes | None = None) -> str:
+        """线程安全的解密（取读锁）。"""
+        with self._rw_lock.read():
+            return self.vault.decrypt(blob, aad=aad)
+
     # ===== 首次初始化 =====
 
     def initialize(self, master_password: str) -> None:
@@ -88,9 +142,10 @@ class Runtime:
                 s.add(KVStore(key=_KV_ARGON2_PARAMS, value=json.dumps(params.to_dict())))
                 s.add(KVStore(key=_KV_MASTER_PW_HASH, value=pw_hash))
                 s.add(KVStore(key=_KV_INITIALIZED, value="1"))
-            pepper = settings.ensure_secret_key()
-            self._vault = CryptoVault(params, master_key, pepper=pepper)
-            self._initialized = True
+            with self._rw_lock.write():
+                pepper = settings.ensure_secret_key()
+                self._vault = CryptoVault(params, master_key, pepper=pepper)
+                self._initialized = True
         except Exception:
             # 清零派生密钥
             bytearray(master_key)[:0]  # no-op, kept for clarity
@@ -112,16 +167,18 @@ class Runtime:
             return False
         params = Argon2Params.from_dict(json.loads(params_row.value))
         master_key = derive_master_key(master_password, params)
-        pepper = get_settings().ensure_secret_key()
-        self._vault = CryptoVault(params, master_key, pepper=pepper)
+        with self._rw_lock.write():
+            pepper = get_settings().ensure_secret_key()
+            self._vault = CryptoVault(params, master_key, pepper=pepper)
         return True
 
     # ===== 锁定 / 退出 =====
 
     def lock(self) -> None:
-        if self._vault is not None:
-            self._vault.zero()
-            self._vault = None
+        with self._rw_lock.write():
+            if self._vault is not None:
+                self._vault.zero()
+                self._vault = None
 
     # ===== 主密码变更 =====
 
@@ -164,9 +221,9 @@ class Runtime:
             raise ValueError("old master password incorrect")
 
         settings = get_settings()
-        old_vault = self._vault
 
         # 2. 派生新主密钥（此时旧 vault 仍可用，新 vault 仅暂存）
+        # Argon2 派生耗时，放在写锁外避免阻塞所有 encrypt/decrypt。
         new_params = new_argon2_params(
             time_cost=settings.argon2_time_cost,
             memory_cost=settings.argon2_memory_cost,
@@ -177,44 +234,65 @@ class Runtime:
         new_vault = CryptoVault(new_params, new_master_key, pepper=pepper)
         new_pw_hash = hash_master_password(new_password)
 
-        # 3. 单事务：重新加密所有未删除凭证 + 更新 KVStore（原子提交）
+        # 3-4. 关键区：取写锁，确保重加密期间 old_vault 不会被并发 lock() 清零。
+        # 若不持锁，lock() 会调用 self._vault.zero()，而 old_vault 与 self._vault
+        # 指向同一对象，重加密中的 old_vault.decrypt 会失败/产生垃圾数据。
         from .models import Credential  # 局部 import 避免循环
         reencrypted = 0
-        try:
-            with session_scope() as s:
-                if reencrypt:
-                    creds = s.execute(
-                        select(Credential).where(Credential.deleted == False)  # noqa: E712
-                    ).scalars().all()
-                    for c in creds:
-                        aad = f"{c.id}:{c.name}".encode("utf-8")
-                        try:
-                            plaintext = old_vault.decrypt(c.encrypted_value, aad=aad)
-                        except Exception:
+        with self._rw_lock.write():
+            if self._vault is None:
+                # 进入关键区前被并发 lock()，放弃操作
+                new_vault.zero()
+                raise RuntimeError("KeyHub was locked during password change")
+            old_vault = self._vault
+            try:
+                with session_scope() as s:
+                    if reencrypt:
+                        creds = s.execute(
+                            select(Credential).where(Credential.deleted == False)  # noqa: E712
+                        ).scalars().all()
+                        for c in creds:
+                            aad = f"{c.id}:{c.name}".encode("utf-8")
                             try:
-                                plaintext = old_vault.decrypt(c.encrypted_value, aad=None)
+                                plaintext = old_vault.decrypt(c.encrypted_value, aad=aad)
                             except Exception:
-                                plaintext = old_vault.decrypt(c.encrypted_value)
-                        c.encrypted_value = new_vault.encrypt(plaintext, aad=aad)
-                        reencrypted += 1
-                # 同一事务内更新 KVStore，保证与重加密原子提交
-                params_row = s.execute(
-                    select(KVStore).where(KVStore.key == _KV_ARGON2_PARAMS)
-                ).scalar_one()
-                params_row.value = json.dumps(new_params.to_dict())
-                master_hash_row = s.execute(
-                    select(KVStore).where(KVStore.key == _KV_MASTER_PW_HASH)
-                ).scalar_one()
-                master_hash_row.value = new_pw_hash
-        except Exception:
-            # 事务已回滚：凭证与 KVStore 均保持旧状态，旧 vault 仍可用
-            # 清零新派生密钥
-            new_vault.zero()
-            raise
+                                try:
+                                    plaintext = old_vault.decrypt(c.encrypted_value, aad=None)
+                                except Exception:
+                                    plaintext = old_vault.decrypt(c.encrypted_value)
+                            c.encrypted_value = new_vault.encrypt(plaintext, aad=aad)
+                            reencrypted += 1
+                            # 同步重加密该凭证的轮换历史（旧密文，用于回滚），
+                            # 否则改密后回滚会因旧 vault 失效而无法解密。
+                            for rot in c.rotations:
+                                if not rot.encrypted_value:
+                                    continue
+                                try:
+                                    old_pt = old_vault.decrypt(rot.encrypted_value, aad=aad)
+                                except Exception:
+                                    try:
+                                        old_pt = old_vault.decrypt(rot.encrypted_value, aad=None)
+                                    except Exception:
+                                        continue  # 无法解密的旧记录跳过，不阻塞改密
+                                rot.encrypted_value = new_vault.encrypt(old_pt, aad=aad)
+                    # 同一事务内更新 KVStore，保证与重加密原子提交
+                    params_row = s.execute(
+                        select(KVStore).where(KVStore.key == _KV_ARGON2_PARAMS)
+                    ).scalar_one()
+                    params_row.value = json.dumps(new_params.to_dict())
+                    master_hash_row = s.execute(
+                        select(KVStore).where(KVStore.key == _KV_MASTER_PW_HASH)
+                    ).scalar_one()
+                    master_hash_row.value = new_pw_hash
+            except Exception:
+                # 事务已回滚：凭证与 KVStore 均保持旧状态，旧 vault 仍可用
+                # 清零新派生密钥
+                new_vault.zero()
+                raise
 
-        # 4. 事务提交成功后才替换运行时 vault
-        old_vault.zero()
-        self._vault = new_vault
+            # 4. 事务提交成功后替换运行时 vault（已在写锁内）
+            old_vault.zero()
+            self._vault = new_vault
         return reencrypted
 
     @property
