@@ -96,9 +96,19 @@ class Settings(BaseSettings):
         return self.env.lower() == "production"
 
     def ensure_secret_key(self) -> str:
-        """若未配置 secret_key，则启动时随机生成（重启后旧 token 失效）。"""
+        """若未配置 secret_key，则启动时随机生成（重启后旧 token 失效）。
+
+        多 worker 部署时务必设置 KEYHUB_SECRET_KEY 环境变量，
+        否则各 worker 生成不同的密钥导致 session cookie 互不兼容，
+        表现为页面能加载但 API 401（死循环）。
+        """
         if not self.secret_key:
             self.secret_key = _secrets.token_urlsafe(48)
+            import logging
+            logging.getLogger("keyhub").warning(
+                "KEYHUB_SECRET_KEY 未设置，已随机生成。"
+                "多 worker 部署时会导致 session 不兼容，请通过环境变量配置固定密钥。"
+            )
         return self.secret_key
 
 

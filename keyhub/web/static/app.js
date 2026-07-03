@@ -5,6 +5,19 @@
 // ===== API 封装（带 401 自动跳转、错误归一化）=====
 // 标记是否正在处理 401 跳转，避免重复跳转与循环
 let _handling401 = false;
+// sessionStorage 键：记录 401 重定向次数，跨页面重载防循环
+const _REDIRECT_KEY = '_kh_401_redirects';
+const _REDIRECT_MAX = 1; // 最多自动重定向 1 次，超过则停止
+
+function _redirectCount() {
+  try { return parseInt(sessionStorage.getItem(_REDIRECT_KEY) || '0', 10); } catch { return 0; }
+}
+function _bumpRedirect() {
+  try { sessionStorage.setItem(_REDIRECT_KEY, String(_redirectCount() + 1)); } catch {}
+}
+function _clearRedirect() {
+  try { sessionStorage.removeItem(_REDIRECT_KEY); } catch {}
+}
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -12,14 +25,28 @@ async function api(path, opts = {}) {
     ...opts,
   });
   if (res.status === 401) {
-    // session 过期 → 跳回解锁页（首页路由会渲染解锁页）
+    // session 过期 → 先清除 cookie 再跳回解锁页
+    // 调用 /api/auth/logout 确保浏览器删除 session cookie，
+    // 避免后端仍认为 session 有效而渲染 panel 导致循环
     if (!_handling401) {
       _handling401 = true;
-      toast('会话已过期，请重新解锁', 'info', 2000);
+      const count = _redirectCount();
+      if (count >= _REDIRECT_MAX) {
+        // 已重定向过但仍 401：停止自动重定向，避免死循环
+        _clearRedirect();
+        toast('会话已过期，自动跳转失败。请手动刷新或重新解锁。', 'error', 8000);
+        throw new Error('会话已过期，请手动刷新页面');
+      }
+      _bumpRedirect();
+      toast('会话已过期，正在跳转解锁页…', 'info', 2000);
+      // 先清除 session cookie，再跳转
+      try { await fetch('/api/auth/logout', { method: 'POST', headers: { 'Content-Type': 'application/json' } }); } catch {}
       setTimeout(() => { location.href = '/'; }, 800);
     }
     throw new Error('会话已过期，请重新解锁');
   }
+  // 收到非 401 响应说明 session 有效，清除重定向计数
+  _clearRedirect();
   if (!res.ok) {
     let msg = res.statusText || `HTTP ${res.status}`;
     try { msg = (await res.json()).detail || msg; } catch {}
@@ -306,8 +333,8 @@ async function loadLLM() {
       costHtml += `<div class="stat" style="animation:fadeInUp 0.5s var(--ease-out-expo) both"><div class="num accent">$${v.cost_usd.toFixed(4)}</div><div class="lbl">${esc(p)} · ${v.calls} 次调用</div></div>`;
     }
     el('llm-cost').innerHTML = costHtml || '<div class="empty-state" style="padding:24px"><div class="empty-state-icon">📊</div><div class="empty-state-text">暂无用量</div></div>';
+    loadChatModels();
   } catch (e) { console.error(e); }
-  loadChatModels();
 }
 window.loadLLM = loadLLM;
 
