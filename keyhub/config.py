@@ -33,7 +33,7 @@ class Settings(BaseSettings):
 
     # Argon2 派生参数（仅初始化时使用，后续不可更改）
     argon2_time_cost: int = 3
-    argon2_memory_cost: int = 65536  # 64 MiB
+    argon2_memory_cost: int = 131072  # 128 MiB（OWASP 2023 推荐 64MB，此处取更安全值）
     argon2_parallelism: int = 4
 
     # Token / Session 签名密钥
@@ -89,6 +89,7 @@ class Settings(BaseSettings):
     notify_email_smtp_password: str = ""
     notify_email_from: str = ""
     notify_email_to: str = ""              # 逗号分隔多个收件人
+    notify_email_require_tls: bool = True  # 强制 STARTTLS，防止明文中继凭证
 
     @property
     def db_url(self) -> str:

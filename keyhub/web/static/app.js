@@ -638,6 +638,9 @@ window.sendChatMessage = async function() {
     } else {
       showChatError(e.message);
       if (assistantBubble) assistantBubble.remove();
+      // 请求失败：回滚已压入 chatHistory 的用户消息，避免下次发送时
+      // 把失败消息再次发给上游导致上下文错乱
+      chatHistory.pop();
     }
   } finally {
     setGeneratingState(false);
@@ -772,8 +775,8 @@ function appendAuditEntry(x) {
   }
   const loading = list.querySelector('.loading');
   if (loading) return;
-  const time = x.created_at?.replace('T', ' ').slice(0, 19) || '-';
-  const detailStr = x.detail ? Object.entries(x.detail).map(([k, v]) => `${k}=${esc(String(v))}`).join(' ') : '';
+  const time = esc(x.created_at?.replace('T', ' ').slice(0, 19) || '-');
+  const detailStr = x.detail ? Object.entries(x.detail).map(([k, v]) => `${esc(k)}=${esc(String(v))}`).join(' ') : '';
   const item = document.createElement('div');
   item.className = 'audit-item';
   item.style.animation = 'fadeInUp 0.3s ease';
@@ -827,8 +830,8 @@ async function loadAudit() {
       el('audit-list').innerHTML = '<div class="empty-state" style="padding:28px"><div class="empty-state-icon">📋</div><div class="empty-state-text">暂无审计记录</div></div>';
     } else {
       el('audit-list').innerHTML = list.map(x => {
-        const time = x.created_at?.replace('T', ' ').slice(0, 19) || '-';
-        const detailStr = x.detail ? Object.entries(x.detail).map(([k, v]) => `${k}=${esc(String(v))}`).join(' ') : '';
+        const time = esc(x.created_at?.replace('T', ' ').slice(0, 19) || '-');
+        const detailStr = x.detail ? Object.entries(x.detail).map(([k, v]) => `${esc(k)}=${esc(String(v))}`).join(' ') : '';
         return `<div class="audit-item">
           <span class="audit-time">${time}</span>
           <span class="audit-action ${x.success ? '' : 'failed'}">${esc(x.action)}</span>

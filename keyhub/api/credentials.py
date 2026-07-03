@@ -33,8 +33,13 @@ from ..store import (
 from ..auth import require_auth, require_scope
 from ..audit import record as audit_record
 from ..importers import import_bitwarden_json, import_keepass_csv
+from ..structured_logging import safe_detail
 
 router = APIRouter(prefix="/api/credentials", tags=["credentials"])
+
+# 单次导入凭证数量上限：防止超大批量请求耗尽内存/CPU（DoS）。
+# 个人密钥库场景下 5000 已远超实际需求；需要更多请分批导入。
+MAX_IMPORT_ITEMS = 5000
 
 
 @router.post("", response_model=CredentialOut)
@@ -83,6 +88,8 @@ def import_credentials(
         if not isinstance(body, list):
             raise HTTPException(400, "json format expects a list of credential items")
         items = body
+        if len(items) > MAX_IMPORT_ITEMS:
+            raise HTTPException(413, f"too many items ({len(items)}), max {MAX_IMPORT_ITEMS} per batch")
     elif format == "bitwarden":
         if isinstance(body, dict) and "items" in body:
             items_data = body["items"]
@@ -93,7 +100,9 @@ def import_credentials(
         try:
             creds_to_import = import_bitwarden_json(items_data)
         except Exception as e:
-            raise HTTPException(400, f"failed to parse bitwarden data: {e}")
+            raise HTTPException(400, safe_detail(e, "failed to parse bitwarden data"))
+        if len(creds_to_import) > MAX_IMPORT_ITEMS:
+            raise HTTPException(413, f"too many items ({len(creds_to_import)}), max {MAX_IMPORT_ITEMS} per batch")
         for data in creds_to_import:
             try:
                 create_credential(data, actor=actor)
@@ -104,7 +113,7 @@ def import_credentials(
                 else:
                     results["errors"].append({"name": data.name, "error": str(e)})
             except Exception as e:
-                results["errors"].append({"name": data.name, "error": str(e)})
+                results["errors"].append({"name": data.name, "error": safe_detail(e, "import failed")})
         audit_record(AuditAction.credential_import, actor, detail={**results, "format": format})
         return results
     elif format == "keepass_csv":
@@ -114,7 +123,9 @@ def import_credentials(
         try:
             creds_to_import = import_keepass_csv(csv_data)
         except Exception as e:
-            raise HTTPException(400, f"failed to parse CSV data: {e}")
+            raise HTTPException(400, safe_detail(e, "failed to parse CSV data"))
+        if len(creds_to_import) > MAX_IMPORT_ITEMS:
+            raise HTTPException(413, f"too many items ({len(creds_to_import)}), max {MAX_IMPORT_ITEMS} per batch")
         for data in creds_to_import:
             try:
                 create_credential(data, actor=actor)
@@ -125,7 +136,7 @@ def import_credentials(
                 else:
                     results["errors"].append({"name": data.name, "error": str(e)})
             except Exception as e:
-                results["errors"].append({"name": data.name, "error": str(e)})
+                results["errors"].append({"name": data.name, "error": safe_detail(e, "import failed")})
         audit_record(AuditAction.credential_import, actor, detail={**results, "format": format})
         return results
     else:
@@ -142,7 +153,7 @@ def import_credentials(
             else:
                 results["errors"].append({"name": item.get("name", "?"), "error": str(e)})
         except Exception as e:
-            results["errors"].append({"name": item.get("name", "?"), "error": str(e)})
+            results["errors"].append({"name": item.get("name", "?"), "error": safe_detail(e, "import failed")})
     audit_record(AuditAction.credential_import, actor, detail={**results, "format": format})
     return results
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import secrets as _secrets
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Annotated, Optional
 
 from fastapi import Depends, HTTPException, Request, status
@@ -59,7 +59,10 @@ def create_token(name: str, scopes: list[str], expires_in_hours: int | None) -> 
     raw = generate_api_token()
     expires_at = None
     if expires_in_hours:
-        expires_at = datetime.now(timezone.utc) + timedelta(hours=expires_in_hours)
+        # 使用 naive UTC 与 DB 列及其它时间戳保持一致；
+        # 此前用 datetime.now(timezone.utc) 存入无 tz 的 DateTime 列，
+        # 再与 datetime.utcnow() 比较会触发 aware/naive TypeError
+        expires_at = datetime.utcnow() + timedelta(hours=expires_in_hours)
     record = APIToken(
         name=name,
         token_hash=hash_token(raw),

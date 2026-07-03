@@ -33,6 +33,7 @@ from ..llm.proxy import LLMProxyError, chat, chat_stream
 from ..llm.providers import PRICING, get_provider
 from ..models import AuditAction, Credential, LLMKey
 from ..runtime import get_runtime
+from ..structured_logging import safe_detail
 
 router = APIRouter(prefix="/v1", tags=["openai-compatible"])
 
@@ -123,7 +124,9 @@ def chat_completions(body: dict[str, Any], actor: str = Depends(require_scope("l
                 payload = {"error": {"message": str(e), "type": "upstream_error", "code": None}}
                 yield f"data: {json.dumps(payload)}\n\n".encode("utf-8")
             except Exception as e:  # noqa: BLE001
-                payload = {"error": {"message": str(e), "type": "internal_error", "code": None}}
+                # 不向客户端泄漏内部异常详情（可能含堆栈/路径/DB 错误）
+                safe = safe_detail(e, "internal error")
+                payload = {"error": {"message": safe, "type": "internal_error", "code": None}}
                 yield f"data: {json.dumps(payload)}\n\n".encode("utf-8")
 
         audit_record(
@@ -152,7 +155,7 @@ def chat_completions(body: dict[str, Any], actor: str = Depends(require_scope("l
     except LLMProxyError as e:
         return _openai_error(502, str(e), err_type="upstream_error")
     except Exception as e:  # noqa: BLE001
-        return _openai_error(500, str(e), err_type="internal_error")
+        return _openai_error(500, safe_detail(e, "internal error"), err_type="internal_error")
 
 
 @router.get("/models")
@@ -281,7 +284,8 @@ def embeddings(body: dict[str, Any], actor: str = Depends(require_scope("llm:cha
                     r = client.post(url, headers=headers, json=req_body)
             except httpx.RequestError as e:
                 balancer.mark_error(key.id)
-                return _openai_error(502, str(e), err_type="upstream_error")
+                # 网络错误可能含内部主机名/URL，不直接回传客户端
+                return _openai_error(502, safe_detail(e, "upstream network error"), err_type="upstream_error")
 
             if r.status_code == 429:
                 from ..llm.balancer import _parse_retry_after
@@ -301,4 +305,4 @@ def embeddings(body: dict[str, Any], actor: str = Depends(require_scope("llm:cha
             balancer.release(key.id)
             raise
     except Exception as e:  # noqa: BLE001
-        return _openai_error(500, str(e), err_type="internal_error")
+        return _openai_error(500, safe_detail(e, "internal error"), err_type="internal_error")

@@ -8,6 +8,7 @@ from fastapi.responses import Response
 from ..auth import require_scope
 from ..notify import get_notifier
 from ..runtime import get_runtime
+from ..structured_logging import safe_detail
 
 router = APIRouter(prefix="/api/system", tags=["system"])
 
@@ -19,13 +20,16 @@ def healthz():
 
 @router.get("/status")
 def status():
+    """返回金库初始化状态（公开端点）。
+
+    仅返回 initialized 布尔值：前端据此决定渲染初始化页还是解锁页。
+    不暴露 locked/unlocked 状态——这些属于运行时敏感信息，
+    未认证调用方无需得知金库当前是否已解锁。已认证调用方可通过
+    API 调用是否返回 401 自行推断锁定状态。
+    """
     rt = get_runtime()
     s = rt.status()
-    return {
-        "initialized": s.initialized,
-        "locked": s.locked,
-        "unlocked": rt.unlocked,
-    }
+    return {"initialized": s.initialized}
 
 
 @router.post("/notify/test")
@@ -45,7 +49,8 @@ def encrypted_backup(
     except RuntimeError as e:
         raise HTTPException(400, str(e))
     except Exception as e:
-        raise HTTPException(500, f"backup failed: {e}")
+        # 不向客户端泄漏内部异常详情（可能含路径/堆栈/密钥材料）
+        raise HTTPException(500, safe_detail(e, "backup failed"))
     return Response(
         content=data,
         media_type="application/octet-stream",
@@ -68,5 +73,6 @@ async def encrypted_restore(
     except RuntimeError as e:
         raise HTTPException(400, str(e))
     except Exception as e:
-        raise HTTPException(500, f"restore failed: {e}")
+        # 不向客户端泄漏内部异常详情
+        raise HTTPException(500, safe_detail(e, "restore failed"))
     return {"message": "restore completed", "credentials_count": count}

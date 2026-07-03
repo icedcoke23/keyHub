@@ -70,10 +70,12 @@ class Argon2Params:
 
     @classmethod
     def from_dict(cls, d: dict) -> "Argon2Params":
+        # fallback 与 new_argon2_params / config 默认值保持一致（131072），
+        # 避免旧参数字典缺字段时回退到不一致的值导致派生密钥不匹配
         return cls(
             salt=bytes.fromhex(d["salt"]),
             time_cost=int(d.get("time_cost", 3)),
-            memory_cost=int(d.get("memory_cost", 65536)),
+            memory_cost=int(d.get("memory_cost", 131072)),
             parallelism=int(d.get("parallelism", 4)),
         )
 
@@ -197,20 +199,35 @@ def new_argon2_params(
     )
 
 
-_pw_hasher = PasswordHasher(
-    time_cost=3,
-    memory_cost=131072,
-    parallelism=4,
-)
+# 主密码哈希器：参数跟随 config（与主密钥派生保持一致）。
+# 旧实现将 _pw_hasher 写死为 memory_cost=131072，与 config 默认值
+# （曾为 65536）不一致；现统一以 config 为单一来源，并按参数缓存。
+_pw_hasher: Optional[PasswordHasher] = None
+_pw_hasher_key: Optional[tuple] = None
+
+
+def _get_pw_hasher() -> PasswordHasher:
+    global _pw_hasher, _pw_hasher_key
+    from .config import get_settings
+    s = get_settings()
+    key = (s.argon2_time_cost, s.argon2_memory_cost, s.argon2_parallelism)
+    if _pw_hasher is None or _pw_hasher_key != key:
+        _pw_hasher = PasswordHasher(
+            time_cost=s.argon2_time_cost,
+            memory_cost=s.argon2_memory_cost,
+            parallelism=s.argon2_parallelism,
+        )
+        _pw_hasher_key = key
+    return _pw_hasher
 
 
 def hash_master_password(password: str) -> str:
-    return _pw_hasher.hash(password)
+    return _get_pw_hasher().hash(password)
 
 
 def verify_master_password(password: str, phc_hash: str) -> bool:
     try:
-        return _pw_hasher.verify(phc_hash, password)
+        return _get_pw_hasher().verify(phc_hash, password)
     except VerifyMismatchError:
         return False
     except Exception:
@@ -218,11 +235,7 @@ def verify_master_password(password: str, phc_hash: str) -> bool:
 
 
 def needs_rehash(phc_hash: str) -> bool:
-    return _pw_hasher.check_needs_rehash(phc_hash)
-
-
-def secure_zero_string(s: str) -> None:
-    del s
+    return _get_pw_hasher().check_needs_rehash(phc_hash)
 
 
 def generate_password(

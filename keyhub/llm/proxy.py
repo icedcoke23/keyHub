@@ -69,7 +69,7 @@ def _backoff_wait(attempt: int) -> None:
 
 
 def _friendly_error(err: Exception | str) -> str:
-    """将底层异常转换为用户友好的中文提示，隐藏原始堆栈/SSL 细节。"""
+    """将底层异常转换为用户友好的中文提示，隐藏原始堆栈/SSL/上游响应体细节。"""
     msg = str(err)
 
     if "UNEXPECTED_EOF" in msg or "EOF in violation" in msg:
@@ -99,9 +99,13 @@ def _friendly_error(err: Exception | str) -> str:
     if "upstream 4" in msg:
         return "LLM 上游拒绝请求（4xx），请检查模型名与参数"
 
-    if len(msg) > 120:
-        return msg[:120] + "…"
-    return msg
+    # 已知受控消息：KeyHub 自身构造的中文提示，直接透传
+    if any(kw in msg for kw in ("没有可用的 key", "调用失败", "并发请求数", "rate limit exceeded")):
+        return msg
+
+    # 兜底：不返回原始 message（可能含上游响应体/内部状态/路径），
+    # 避免向客户端泄漏。完整异常已通过 _record_failed / 调用方日志记录。
+    return "LLM 调用失败，请稍后重试"
 
 
 def _decrypt_key(llm_key_id: str, credential_encrypted_value: bytes, cred_name: str = "") -> str:

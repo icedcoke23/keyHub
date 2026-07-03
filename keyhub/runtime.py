@@ -152,8 +152,8 @@ class Runtime:
                 self._vault = CryptoVault(params, master_key, pepper=pepper)
                 self._initialized = True
             except Exception:
-                # 清零派生密钥
-                bytearray(master_key)[:0]  # no-op, kept for clarity
+                # master_key 为 bytes（不可变），无法原地清零；
+                # 异常后局部引用随栈帧释放，由 GC 回收
                 raise
 
     # ===== 解锁 =====
