@@ -34,10 +34,19 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
 def _client_ip(request: Request) -> str:
-    # 信任反向代理设置的 X-Forwarded-For
-    xff = request.headers.get("x-forwarded-for")
-    if xff:
-        return xff.split(",")[0].strip()
+    """获取真实客户端 IP，基于 trusted_proxy_depth 配置。
+
+    与 auth.py 的 _client_ip 保持一致，避免限流误判：
+    - depth=0：完全不信任 XFF，用 request.client.host
+    - depth=N：取 XFF 倒数第 N 个 IP（即最接近本服务的可信反代前一跳）
+    避免伪造 XFF 导致所有用户被当成同一 IP 限流误锁。
+    """
+    depth = get_settings().trusted_proxy_depth
+    if depth > 0:
+        xff = request.headers.get("x-forwarded-for", "")
+        parts = [p.strip() for p in xff.split(",") if p.strip()]
+        if len(parts) >= depth:
+            return parts[-depth]
     return request.client.host if request.client else "unknown"
 
 

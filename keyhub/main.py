@@ -58,6 +58,18 @@ async def lifespan(app: FastAPI):
         if deleted:
             print(f"[audit] cleaned up {deleted} old log entries", flush=True)
 
+    # 多 worker 部署下，每个 worker 是独立进程，vault（主密钥）存在内存中无法共享。
+    # 若配置了 KEYHUB_MASTER_PASSWORD，所有 worker 启动时自动解锁，保证 vault 一致。
+    # 否则只能用单 worker（gunicorn --workers 1）+ web 解锁。
+    from .runtime import get_runtime
+    rt = get_runtime()
+    if rt.is_initialized() and settings.master_password:
+        if rt.unlock(settings.master_password):
+            print("[runtime] KEYHUB_MASTER_PASSWORD 已配置，worker 启动时自动解锁", flush=True)
+        else:
+            print("[runtime] WARNING: KEYHUB_MASTER_PASSWORD 验证失败，自动解锁未成功。"
+                  "多 worker 部署下请检查密码，否则 API 会因 vault 锁定返回 401。", flush=True)
+
     yield
     # 关闭
     checker.stop()
