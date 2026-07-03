@@ -1277,9 +1277,9 @@ button:focus-visible, .btn:focus-visible { outline-offset: 3px; }
   --border-strong: rgba(100, 116, 139, 0.38);
   --border-glow: rgba(13, 148, 136, 0.45);
 
-  /* —— 文字：深色保证对比度 —— */
+  /* —— 文字：深色保证对比度（全部 ≥ WCAG AA 4.5:1）—— */
   --text: #0f172a;
-  --text-2: #334155;
+  --text-2: #1e293b;
   --muted: #475569;
   --muted-2: #64748b;
 
@@ -1292,13 +1292,13 @@ button:focus-visible, .btn:focus-visible { outline-offset: 3px; }
   /* 按钮主色上的文字：白色，深色按钮上更清晰 */
   --on-accent: #ffffff;
 
-  /* —— 状态色：降低明度、提高饱和度，白底可读 —— */
-  --danger: #dc2626;
-  --danger-soft: rgba(220, 38, 38, 0.1);
+  /* —— 状态色：加深保证白底对比度 ≥ 4.5:1 (WCAG AA) —— */
+  --danger: #e11d48;
+  --danger-soft: rgba(225, 29, 72, 0.1);
   --warn: #b45309;
   --warn-soft: rgba(180, 83, 9, 0.1);
-  --ok: #059669;
-  --ok-soft: rgba(5, 150, 105, 0.1);
+  --ok: #047857;
+  --ok-soft: rgba(4, 120, 87, 0.1);
   --info: #2563eb;
   --info-soft: rgba(37, 99, 235, 0.1);
 
@@ -1314,13 +1314,13 @@ button:focus-visible, .btn:focus-visible { outline-offset: 3px; }
   --decor-btn-shadow: rgba(15, 118, 110, 0.2);
   --decor-btn-shadow-hover: rgba(15, 118, 110, 0.3);
   /* 状态色装饰：适配亮色背景的更深状态色 */
-  --danger-border: rgba(220, 38, 38, 0.4);
-  --danger-glow: rgba(220, 38, 38, 0.5);
-  --danger-btn-shadow: rgba(220, 38, 38, 0.2);
-  --danger-btn-shadow-hover: rgba(220, 38, 38, 0.3);
+  --danger-border: rgba(225, 29, 72, 0.4);
+  --danger-glow: rgba(225, 29, 72, 0.5);
+  --danger-btn-shadow: rgba(225, 29, 72, 0.2);
+  --danger-btn-shadow-hover: rgba(225, 29, 72, 0.3);
   --warn-border: rgba(180, 83, 9, 0.4);
   --warn-box-border: rgba(180, 83, 9, 0.3);
-  --ok-border: rgba(5, 150, 105, 0.4);
+  --ok-border: rgba(4, 120, 87, 0.4);
   --info-border: rgba(37, 99, 235, 0.4);
 
   /* —— 阴影：加重以补偿不透明表面的层次缺失 —— */
@@ -1376,6 +1376,148 @@ button:focus-visible, .btn:focus-visible { outline-offset: 3px; }
 [data-theme="light"] button:hover {
   box-shadow: 0 1px 0 rgba(255, 255, 255, 0.3) inset,
               0 8px 24px var(--decor-btn-shadow-hover);
+}
+
+/* 亮色模式：secondary 按钮改为白底+强调色描边，不用灰底 */
+[data-theme="light"] button.secondary {
+  background: var(--bg-1);
+  color: var(--accent);
+  border: 1px solid var(--border-strong);
+  box-shadow: var(--shadow-sm);
+}
+[data-theme="light"] button.secondary::before { display: none; }
+[data-theme="light"] button.secondary:hover {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+/* 亮色模式：ghost 按钮加深文字 */
+[data-theme="light"] button.ghost {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border-strong);
+}
+[data-theme="light"] button.ghost:hover {
+  color: var(--text);
+  background: var(--surface-3);
+  border-color: var(--border-strong);
+}
+
+/* 亮色模式：label 加深加粗，提高可读性 */
+[data-theme="light"] label {
+  color: var(--text-2);
+  font-weight: 600;
+}
+
+/* 亮色模式：表格头加深 */
+[data-theme="light"] thead th {
+  color: var(--text-2);
+  background: var(--surface-3);
+  border-bottom-color: var(--border-strong);
+}
+[data-theme="light"] tbody td {
+  color: var(--text-2);
+}
+[data-theme="light"] tbody tr:hover td {
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+/* 亮色模式：标签文字加深 */
+[data-theme="light"] .tag {
+  background: var(--surface-3);
+  border-color: var(--border-strong);
+  color: var(--text-2);
+}
+[data-theme="light"] .tag.ok { color: var(--ok); border-color: var(--ok-border); background: var(--ok-soft); }
+[data-theme="light"] .tag.warn { color: var(--warn); border-color: var(--warn-border); background: var(--warn-soft); }
+[data-theme="light"] .tag.danger { color: var(--danger); border-color: var(--danger-border); background: var(--danger-soft); }
+[data-theme="light"] .tag.info { color: var(--info); border-color: var(--info-border); background: var(--info-soft); }
+
+/* 亮色模式：tab 文字加深 */
+[data-theme="light"] .tab { color: var(--muted); }
+[data-theme="light"] .tab:hover { color: var(--text-2); }
+[data-theme="light"] .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+/* 亮色模式：导航栏、统计卡片白底 */
+[data-theme="light"] .nav { background: var(--bg-1); border-color: var(--border-strong); }
+[data-theme="light"] .nav .logo .brand-sub { color: var(--muted); }
+[data-theme="light"] .stat { background: var(--bg-1); border-color: var(--border-strong); }
+[data-theme="light"] .stat .num { color: var(--text); }
+[data-theme="light"] .stat .lbl { color: var(--text-2); }
+[data-theme="light"] .stat .sub { color: var(--muted); }
+
+/* 亮色模式：Toast 白底 */
+[data-theme="light"] .toast {
+  background: var(--bg-1);
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+[data-theme="light"] .toast.error { border-left-color: var(--danger); }
+[data-theme="light"] .toast.success { border-left-color: var(--ok); }
+[data-theme="light"] .toast.info { border-left-color: var(--info); }
+
+/* 亮色模式：明文展示框 */
+[data-theme="light"] .secret-box {
+  background: linear-gradient(180deg, var(--surface-3), var(--surface-2));
+  border-color: var(--border-strong);
+  color: var(--accent);
+}
+[data-theme="light"] .secret-box::before { color: var(--muted); }
+
+/* 亮色模式：错误/成功消息 */
+[data-theme="light"] .error { color: var(--danger); background: var(--danger-soft); border-left-color: var(--danger); }
+[data-theme="light"] .success { color: var(--ok); background: var(--ok-soft); border-left-color: var(--ok); }
+
+/* 亮色模式：聊天区域 */
+[data-theme="light"] .chat-stream { background: var(--surface-3); border-color: var(--border-strong); color: var(--text-2); }
+[data-theme="light"] .playground { background: var(--bg-1); border-color: var(--border-strong); }
+[data-theme="light"] .chat-toolbar { background: var(--surface-2); border-bottom-color: var(--border-strong); }
+[data-theme="light"] .chat-input { background: var(--bg-1); border-color: var(--border-strong); color: var(--text); }
+[data-theme="light"] .chat-input-area { background: var(--surface-2); border-top-color: var(--border-strong); }
+[data-theme="light"] .chat-avatar { background: var(--surface-3); border-color: var(--border-strong); }
+[data-theme="light"] .chat-message.assistant .chat-bubble {
+  background: var(--surface-2);
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+[data-theme="light"] .chat-message.user .chat-bubble { color: #ffffff; }
+[data-theme="light"] .chat-bubble .md-code { background: var(--surface-3); color: var(--accent); }
+[data-theme="light"] .chat-bubble .md-code-block { background: var(--surface-3); border-color: var(--border-strong); }
+
+/* 亮色模式：审计日志 */
+[data-theme="light"] #audit-list { background: var(--bg-1); border-color: var(--border-strong); }
+[data-theme="light"] .audit-item { border-bottom-color: var(--border); }
+[data-theme="light"] .audit-item:hover { background: var(--accent-soft); }
+[data-theme="light"] .audit-item .audit-time { color: var(--muted); }
+[data-theme="light"] .audit-item .audit-action { color: var(--accent); }
+[data-theme="light"] .audit-item .audit-action.failed { color: var(--danger); }
+[data-theme="light"] .audit-item .audit-detail { color: var(--text-2); }
+[data-theme="light"] .audit-item .audit-actor { color: var(--muted); }
+
+/* 亮色模式：图表、主题切换按钮 */
+[data-theme="light"] .chart-container { background: var(--bg-1); border-color: var(--border-strong); }
+[data-theme="light"] .chart-bar::after { color: var(--muted); }
+[data-theme="light"] .chart-bar::before { color: var(--text-2); }
+[data-theme="light"] .theme-toggle { background: var(--bg-1); border-color: var(--border-strong); color: var(--text-2); }
+[data-theme="light"] .theme-toggle:hover { border-color: var(--accent); color: var(--accent); }
+
+/* 亮色模式：认证页、空状态 */
+[data-theme="light"] .auth-page .tagline { color: var(--text-2); }
+[data-theme="light"] .auth-page .warning-box { background: var(--warn-soft); border-color: var(--warn-box-border); color: var(--warn); }
+[data-theme="light"] .empty-state { color: var(--muted); }
+
+/* 亮色模式：滚动条 */
+[data-theme="light"] ::-webkit-scrollbar-track { background: var(--surface-3); }
+[data-theme="light"] ::-webkit-scrollbar-thumb { background: var(--border-strong); border-color: var(--surface-3); }
+[data-theme="light"] ::-webkit-scrollbar-thumb:hover { background: var(--muted-2); }
+
+/* 亮色模式：骨架屏 */
+[data-theme="light"] .skeleton {
+  background: linear-gradient(90deg, var(--surface-3) 25%, var(--surface-2) 50%, var(--surface-3) 75%);
+  background-size: 200% 100%;
 }
 
 /* 亮色模式：输入框加深内阴影，增强凹陷感 */
