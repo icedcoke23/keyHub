@@ -102,19 +102,60 @@ class Settings(BaseSettings):
         return self.env.lower() == "production"
 
     def ensure_secret_key(self) -> str:
-        """若未配置 secret_key，则启动时随机生成（重启后旧 token 失效）。
+        """确保 secret_key 可用。
 
-        多 worker 部署时务必设置 KEYHUB_SECRET_KEY 环境变量，
-        否则各 worker 生成不同的密钥导致 session cookie 互不兼容，
-        表现为页面能加载但 API 401（死循环）。
+        优先级：
+        1. 环境变量 KEYHUB_SECRET_KEY（推荐，多 worker 部署必用）
+        2. 持久化文件 <db_path 同级目录>/secret_key（自动生成，跨 worker 共享）
+        3. 内存随机生成（仅单 worker 开发场景，重启后旧 session 失效）
+
+        多 worker 部署（gunicorn/uvicorn --workers N）下，若未设置环境变量，
+        各 worker 会各自生成不同密钥，导致 session cookie 跨 worker 不兼容，
+        表现为：解锁成功但 API 401 → "会话已过期" 死循环。
+        持久化文件方案确保所有 worker 读取同一密钥。
         """
-        if not self.secret_key:
-            self.secret_key = _secrets.token_urlsafe(48)
-            import logging
-            logging.getLogger("keyhub").warning(
-                "KEYHUB_SECRET_KEY 未设置，已随机生成。"
-                "多 worker 部署时会导致 session 不兼容，请通过环境变量配置固定密钥。"
+        if self.secret_key:
+            return self.secret_key
+
+        import logging
+        log = logging.getLogger("keyhub")
+
+        # 尝试从持久化文件读取（跨 worker 共享）
+        key_file = Path(self.db_path).resolve().parent / "secret_key"
+        try:
+            if key_file.exists():
+                saved = key_file.read_text(encoding="utf-8").strip()
+                if saved:
+                    self.secret_key = saved
+                    log.info("KEYHUB_SECRET_KEY 从持久化文件加载: %s", key_file)
+                    return self.secret_key
+        except OSError as e:
+            log.warning("读取 secret_key 文件失败 (%s): %s", key_file, e)
+
+        # 生成新密钥并持久化（原子写入，防多 worker 竞争）
+        self.secret_key = _secrets.token_urlsafe(48)
+        try:
+            key_file.parent.mkdir(parents=True, exist_ok=True)
+            # 原子写入：先写临时文件再 rename，避免多 worker 同时写入冲突
+            tmp = key_file.with_suffix(".tmp")
+            tmp.write_text(self.secret_key, encoding="utf-8")
+            tmp.replace(key_file)
+            try:
+                key_file.chmod(0o600)
+            except OSError:
+                pass  # Windows 不支持 chmod
+            log.warning(
+                "KEYHUB_SECRET_KEY 未设置，已随机生成并持久化到 %s。"
+                "多 worker 将共享此密钥。生产环境建议通过环境变量显式配置。",
+                key_file,
             )
+        except OSError as e:
+            log.warning(
+                "无法持久化 secret_key 到文件 (%s): %s。"
+                "多 worker 部署将导致 session 不兼容，请设置 KEYHUB_SECRET_KEY 环境变量。",
+                key_file, e,
+            )
+
         return self.secret_key
 
 
