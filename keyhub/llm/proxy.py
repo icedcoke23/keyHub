@@ -220,7 +220,7 @@ def chat(
     settings = get_settings()
     from .cache import get_cache
     cache = get_cache()
-    cached = cache.get(provider, model, messages, temperature, settings.llm_cache_ttl)
+    cached = cache.get(provider, model, messages, temperature, settings.llm_cache_ttl, max_tokens=max_tokens)
     if cached is not None:
         try:
             from ..metrics import llm_cache_hits
@@ -429,7 +429,7 @@ def chat(
             get_latency_stats().record(current_provider, latency_ms)
         except Exception:
             pass
-        cache.set(current_provider, model, messages, temperature, resp_json)
+        cache.set(current_provider, model, messages, temperature, resp_json, max_tokens=max_tokens)
         _release_semaphore()
         return resp_json
 

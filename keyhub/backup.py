@@ -65,7 +65,8 @@ def export_backup(output_path: str, backup_password: str) -> dict[str, Any]:
             select(Credential).where(Credential.deleted == False)  # noqa: E712
         ).scalars().all()
         for c in creds:
-            plaintext = rt.vault.decrypt(c.encrypted_value)
+            with rt.with_vault() as v:
+                plaintext = v.decrypt(c.encrypted_value)
             item = {
                 "name": c.name,
                 "type": c.type.value,

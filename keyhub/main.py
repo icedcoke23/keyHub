@@ -73,6 +73,37 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    # 安全响应头中间件（H12）
+    # 注意：CSP 允许 script/style 的 'unsafe-inline'，因为模板大量使用
+    # 内联 onclick 与 style 属性；其余资源严格限制为 'self'。
+    @app.middleware("http")
+    async def security_headers(request, call_next):
+        response = await call_next(request)
+        h = response.headers
+        h["X-Content-Type-Options"] = "nosniff"
+        h["X-Frame-Options"] = "DENY"
+        h["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        h["Permissions-Policy"] = (
+            "geolocation=(), microphone=(), camera=(), "
+            "payment=(), usb=(), magnetometer=(), gyroscope=()"
+        )
+        # HSTS：仅在请求经由反代/HTTPS 时生效；max-age=1年，含子域名
+        if request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https":
+            h["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        h["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline'; "
+            "style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data:; "
+            "font-src 'self'; "
+            "connect-src 'self'; "
+            "manifest-src 'self'; "
+            "frame-ancestors 'none'; "
+            "base-uri 'none'; "
+            "form-action 'self'"
+        )
+        return response
+
     # 路由
     app.include_router(sys_api.router)
     app.include_router(auth_api.router)

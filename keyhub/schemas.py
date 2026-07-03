@@ -7,7 +7,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
-from .models import CredentialType, LLMKeyStatus
+from .models import DEFAULT_TOKEN_SCOPES, CredentialType, LLMKeyStatus
 
 
 # ===== 凭证 =====
@@ -137,7 +137,7 @@ class ChangePasswordRequest(BaseModel):
 
 class TokenCreate(BaseModel):
     name: str
-    scopes: list[str] = Field(default_factory=lambda: ["*"])
+    scopes: list[str] = Field(default_factory=lambda: list(DEFAULT_TOKEN_SCOPES))
     expires_in_hours: int | None = None
 
 
