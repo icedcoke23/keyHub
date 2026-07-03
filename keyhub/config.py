@@ -33,7 +33,7 @@ class Settings(BaseSettings):
 
     # Argon2 派生参数（仅初始化时使用，后续不可更改）
     argon2_time_cost: int = 3
-    argon2_memory_cost: int = 131072  # 128 MiB（OWASP 2023 推荐 64MB，此处取更安全值）
+    argon2_memory_cost: int = 65536  # 64 MiB
     argon2_parallelism: int = 4
 
     # Token / Session 签名密钥
@@ -58,7 +58,7 @@ class Settings(BaseSettings):
     auto_lock_idle_seconds: int = 1800
     # 可信代理数量：仅当请求经过恰好 N 层可信反代时才信任 X-Forwarded-For。
     # 0 = 完全不信任 XFF，始终用 request.client.host（适用于直连或未知反代）。
-    # 1 = 信任 1 层反代（取 XFF 最后一个 IP）。
+    # 1 = 信任 1 层反代（取 XFF 倒数第 1 个 IP，即真实客户端）。
     # 部署在 Nginx/CDN 后建议设为对应层数。
     trusted_proxy_depth: int = 0
     # API Token 速率限制（每分钟请求数，0 = 禁用）
@@ -89,7 +89,6 @@ class Settings(BaseSettings):
     notify_email_smtp_password: str = ""
     notify_email_from: str = ""
     notify_email_to: str = ""              # 逗号分隔多个收件人
-    notify_email_require_tls: bool = True  # 强制 STARTTLS，防止明文中继凭证
 
     @property
     def db_url(self) -> str:
@@ -107,12 +106,12 @@ class Settings(BaseSettings):
         优先级：
         1. 环境变量 KEYHUB_SECRET_KEY（推荐，多 worker 部署必用）
         2. 持久化文件 <db_path 同级目录>/secret_key（自动生成，跨 worker 共享）
-        3. 内存随机生成（仅单 worker 开发场景，重启后旧 session 失效）
+           使用跨进程文件锁（fcntl.flock）确保多 worker 启动时串行化：
+           第一个 worker 生成并写入文件，后续 worker 读取同一文件。
+        3. 内存随机生成（仅当文件不可写时的兜底，单 worker 场景）
 
-        多 worker 部署（gunicorn/uvicorn --workers N）下，若未设置环境变量，
-        各 worker 会各自生成不同密钥，导致 session cookie 跨 worker 不兼容，
-        表现为：解锁成功但 API 401 → "会话已过期" 死循环。
-        持久化文件方案确保所有 worker 读取同一密钥。
+        多 worker 部署下若密钥不一致，session cookie 跨 worker 不兼容，
+        表现为：解锁成功但 API 401 → "会话已过期"。
         """
         if self.secret_key:
             return self.secret_key
@@ -120,43 +119,53 @@ class Settings(BaseSettings):
         import logging
         log = logging.getLogger("keyhub")
 
-        # 尝试从持久化文件读取（跨 worker 共享）
         key_file = Path(self.db_path).resolve().parent / "secret_key"
-        try:
-            if key_file.exists():
-                saved = key_file.read_text(encoding="utf-8").strip()
-                if saved:
-                    self.secret_key = saved
-                    log.info("KEYHUB_SECRET_KEY 从持久化文件加载: %s", key_file)
-                    return self.secret_key
-        except OSError as e:
-            log.warning("读取 secret_key 文件失败 (%s): %s", key_file, e)
+        key_file.parent.mkdir(parents=True, exist_ok=True)
+        lock_file = key_file.with_suffix(".lock")
 
-        # 生成新密钥并持久化（原子写入，防多 worker 竞争）
-        self.secret_key = _secrets.token_urlsafe(48)
-        try:
-            key_file.parent.mkdir(parents=True, exist_ok=True)
-            # 原子写入：先写临时文件再 rename，避免多 worker 同时写入冲突
-            tmp = key_file.with_suffix(".tmp")
-            tmp.write_text(self.secret_key, encoding="utf-8")
-            tmp.replace(key_file)
+        def _load_or_create() -> str:
+            # 文件已存在 → 读取
             try:
-                key_file.chmod(0o600)
-            except OSError:
-                pass  # Windows 不支持 chmod
-            log.warning(
-                "KEYHUB_SECRET_KEY 未设置，已随机生成并持久化到 %s。"
-                "多 worker 将共享此密钥。生产环境建议通过环境变量显式配置。",
-                key_file,
-            )
-        except OSError as e:
-            log.warning(
-                "无法持久化 secret_key 到文件 (%s): %s。"
-                "多 worker 部署将导致 session 不兼容，请设置 KEYHUB_SECRET_KEY 环境变量。",
-                key_file, e,
-            )
+                if key_file.exists():
+                    saved = key_file.read_text(encoding="utf-8").strip()
+                    if saved:
+                        self.secret_key = saved
+                        log.info("KEYHUB_SECRET_KEY 从持久化文件加载: %s", key_file)
+                        return self.secret_key
+            except OSError as e:
+                log.warning("读取 secret_key 文件失败 (%s): %s", key_file, e)
+            # 生成新密钥并原子写入
+            self.secret_key = _secrets.token_urlsafe(48)
+            try:
+                tmp = key_file.with_suffix(".tmp")
+                tmp.write_text(self.secret_key, encoding="utf-8")
+                tmp.replace(key_file)
+                try:
+                    key_file.chmod(0o600)
+                except OSError:
+                    pass  # Windows 不支持 chmod
+                log.warning(
+                    "KEYHUB_SECRET_KEY 未设置，已随机生成并持久化到 %s。"
+                    "多 worker 将共享此密钥。生产环境建议通过环境变量显式配置。",
+                    key_file,
+                )
+            except OSError as e:
+                log.warning(
+                    "无法持久化 secret_key 到文件 (%s): %s。"
+                    "多 worker 部署将导致 session 不兼容，请设置 KEYHUB_SECRET_KEY 环境变量。",
+                    key_file, e,
+                )
+            return self.secret_key
 
-        return self.secret_key
+        # 跨进程文件锁，确保多 worker 串行化（Linux/Mac 用 fcntl）
+        try:
+            import fcntl
+            with open(lock_file, "w") as lf:
+                fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
+                return _load_or_create()
+        except (ImportError, OSError):
+            # Windows 无 fcntl 或锁文件不可用，直接操作（单 worker 无影响）
+            return _load_or_create()
 
 
 @lru_cache

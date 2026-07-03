@@ -34,24 +34,19 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
 def _client_ip(request: Request) -> str:
-    """获取客户端真实 IP。
+    """获取真实客户端 IP，基于 trusted_proxy_depth 配置。
 
-    仅当配置了 trusted_proxy_depth > 0 时才信任 X-Forwarded-For，
-    且从右向左取第 N 个 IP（N = trusted_proxy_depth），确保只信任
-    可信反代设置的 IP，防止客户端伪造 XFF 绕过限流。
-
-    trusted_proxy_depth=0（默认）：完全不信任 XFF，用 request.client.host。
-    trusted_proxy_depth=1：信任 1 层反代，取 XFF 最后一个 IP。
-    trusted_proxy_depth=2：信任 2 层反代，取 XFF 倒数第二个 IP。
+    与 auth.py 的 _client_ip 保持一致，避免限流误判：
+    - depth=0：完全不信任 XFF，用 request.client.host
+    - depth=N：取 XFF 倒数第 N 个 IP（即最接近本服务的可信反代前一跳）
+    避免伪造 XFF 导致所有用户被当成同一 IP 限流误锁。
     """
     depth = get_settings().trusted_proxy_depth
     if depth > 0:
-        xff = request.headers.get("x-forwarded-for")
-        if xff:
-            parts = [p.strip() for p in xff.split(",") if p.strip()]
-            if len(parts) >= depth:
-                # 从右向左取第 depth 个（最接近可信反代的那一跳）
-                return parts[-depth]
+        xff = request.headers.get("x-forwarded-for", "")
+        parts = [p.strip() for p in xff.split(",") if p.strip()]
+        if len(parts) >= depth:
+            return parts[-depth]
     return request.client.host if request.client else "unknown"
 
 

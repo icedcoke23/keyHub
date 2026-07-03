@@ -24,7 +24,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from sqlalchemy import select
 
 from ..audit import record as audit_record
-from ..auth import require_scope
+from ..auth import require_auth
 from ..config import get_settings
 from ..db import session_scope
 from ..llm.aliases import get_alias_manager
@@ -33,7 +33,6 @@ from ..llm.proxy import LLMProxyError, chat, chat_stream
 from ..llm.providers import PRICING, get_provider
 from ..models import AuditAction, Credential, LLMKey
 from ..runtime import get_runtime
-from ..structured_logging import safe_detail
 
 router = APIRouter(prefix="/v1", tags=["openai-compatible"])
 
@@ -78,7 +77,7 @@ def _openai_error(
 
 
 @router.post("/chat/completions")
-def chat_completions(body: dict[str, Any], actor: str = Depends(require_scope("llm:chat"))):
+def chat_completions(body: dict[str, Any], actor: str = Depends(require_auth)):
     """OpenAI 兼容的聊天补全端点。
 
     请求体为 OpenAI 格式 dict；可选 keyhub_provider 字段显式指定供应商，
@@ -124,9 +123,7 @@ def chat_completions(body: dict[str, Any], actor: str = Depends(require_scope("l
                 payload = {"error": {"message": str(e), "type": "upstream_error", "code": None}}
                 yield f"data: {json.dumps(payload)}\n\n".encode("utf-8")
             except Exception as e:  # noqa: BLE001
-                # 不向客户端泄漏内部异常详情（可能含堆栈/路径/DB 错误）
-                safe = safe_detail(e, "internal error")
-                payload = {"error": {"message": safe, "type": "internal_error", "code": None}}
+                payload = {"error": {"message": str(e), "type": "internal_error", "code": None}}
                 yield f"data: {json.dumps(payload)}\n\n".encode("utf-8")
 
         audit_record(
@@ -155,11 +152,11 @@ def chat_completions(body: dict[str, Any], actor: str = Depends(require_scope("l
     except LLMProxyError as e:
         return _openai_error(502, str(e), err_type="upstream_error")
     except Exception as e:  # noqa: BLE001
-        return _openai_error(500, safe_detail(e, "internal error"), err_type="internal_error")
+        return _openai_error(500, str(e), err_type="internal_error")
 
 
 @router.get("/models")
-def list_models(actor: str = Depends(require_scope("llm:read"))):
+def list_models(actor: str = Depends(require_auth)):
     """聚合已配置 LLM Key 的可用模型，返回 OpenAI 风格的列表。
 
     某 key 配置了 allowed_models → 列出这些模型；
@@ -184,7 +181,7 @@ def list_models(actor: str = Depends(require_scope("llm:read"))):
 
 
 @router.post("/embeddings")
-def embeddings(body: dict[str, Any], actor: str = Depends(require_scope("llm:chat"))):
+def embeddings(body: dict[str, Any], actor: str = Depends(require_auth)):
     """OpenAI 兼容的文本向量端点。
 
     从 model 名推断 provider，选 key、解密后直接调用上游 /v1/embeddings，
@@ -284,8 +281,7 @@ def embeddings(body: dict[str, Any], actor: str = Depends(require_scope("llm:cha
                     r = client.post(url, headers=headers, json=req_body)
             except httpx.RequestError as e:
                 balancer.mark_error(key.id)
-                # 网络错误可能含内部主机名/URL，不直接回传客户端
-                return _openai_error(502, safe_detail(e, "upstream network error"), err_type="upstream_error")
+                return _openai_error(502, str(e), err_type="upstream_error")
 
             if r.status_code == 429:
                 from ..llm.balancer import _parse_retry_after
@@ -305,4 +301,4 @@ def embeddings(body: dict[str, Any], actor: str = Depends(require_scope("llm:cha
             balancer.release(key.id)
             raise
     except Exception as e:  # noqa: BLE001
-        return _openai_error(500, safe_detail(e, "internal error"), err_type="internal_error")
+        return _openai_error(500, str(e), err_type="internal_error")

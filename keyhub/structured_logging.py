@@ -47,31 +47,3 @@ def setup_logging(level: str = "INFO") -> None:
 
 def get_logger(name: str) -> logging.Logger:
     return logging.getLogger(name)
-
-
-# 这些异常类型由 KeyHub 自身显式抛出，其 message 是面向用户的受控文本
-# （如 "name already exists"、"credential 'x' not found"），可直接回传客户端。
-# 其它异常（如第三方库抛出的 DBError / SSL / 网络错误）可能携带内部状态、
-# 文件路径、堆栈片段或上游响应体，必须经 safe_detail() 转为通用提示。
-_SAFE_DETAIL_EXC_TYPES: tuple[type[BaseException], ...] = (ValueError, KeyError)
-
-
-def safe_detail(exc: BaseException, fallback: str = "internal error") -> str:
-    """返回对客户端安全的错误消息，同时把完整异常写入日志。
-
-    - 受控异常（ValueError/KeyError）：直接返回 str(exc)，因其 message 由
-      KeyHub 自身控制、面向用户。
-    - 其它异常：记录 WARNING 级别日志（含类型名、消息与堆栈），向客户端
-      仅返回 fallback，避免泄漏内部状态/路径/上游响应体。
-
-    用法：
-        except Exception as e:
-            raise HTTPException(500, safe_detail(e, "backup failed"))
-    """
-    if isinstance(exc, _SAFE_DETAIL_EXC_TYPES):
-        return str(exc)
-    get_logger("keyhub").warning(
-        "internal error (%s): %s",
-        type(exc).__name__, exc, exc_info=True,
-    )
-    return fallback

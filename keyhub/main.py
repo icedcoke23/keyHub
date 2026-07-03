@@ -58,6 +58,18 @@ async def lifespan(app: FastAPI):
         if deleted:
             print(f"[audit] cleaned up {deleted} old log entries", flush=True)
 
+    # 多 worker 部署下，每个 worker 是独立进程，vault（主密钥）存在内存中无法共享。
+    # 若配置了 KEYHUB_MASTER_PASSWORD，所有 worker 启动时自动解锁，保证 vault 一致。
+    # 否则只能用单 worker（gunicorn --workers 1）+ web 解锁。
+    from .runtime import get_runtime
+    rt = get_runtime()
+    if rt.is_initialized() and settings.master_password:
+        if rt.unlock(settings.master_password):
+            print("[runtime] KEYHUB_MASTER_PASSWORD 已配置，worker 启动时自动解锁", flush=True)
+        else:
+            print("[runtime] WARNING: KEYHUB_MASTER_PASSWORD 验证失败，自动解锁未成功。"
+                  "多 worker 部署下请检查密码，否则 API 会因 vault 锁定返回 401。", flush=True)
+
     yield
     # 关闭
     checker.stop()
@@ -72,37 +84,6 @@ def create_app() -> FastAPI:
         description="个人密钥与大模型 API 凭证管理",
         lifespan=lifespan,
     )
-
-    # 安全响应头中间件（H12）
-    # 注意：CSP 允许 script/style 的 'unsafe-inline'，因为模板大量使用
-    # 内联 onclick 与 style 属性；其余资源严格限制为 'self'。
-    @app.middleware("http")
-    async def security_headers(request, call_next):
-        response = await call_next(request)
-        h = response.headers
-        h["X-Content-Type-Options"] = "nosniff"
-        h["X-Frame-Options"] = "DENY"
-        h["Referrer-Policy"] = "strict-origin-when-cross-origin"
-        h["Permissions-Policy"] = (
-            "geolocation=(), microphone=(), camera=(), "
-            "payment=(), usb=(), magnetometer=(), gyroscope=()"
-        )
-        # HSTS：仅在请求经由反代/HTTPS 时生效；max-age=1年，含子域名
-        if request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https":
-            h["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
-        h["Content-Security-Policy"] = (
-            "default-src 'self'; "
-            "script-src 'self' 'unsafe-inline'; "
-            "style-src 'self' 'unsafe-inline'; "
-            "img-src 'self' data:; "
-            "font-src 'self'; "
-            "connect-src 'self'; "
-            "manifest-src 'self'; "
-            "frame-ancestors 'none'; "
-            "base-uri 'none'; "
-            "form-action 'self'"
-        )
-        return response
 
     # 路由
     app.include_router(sys_api.router)

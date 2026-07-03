@@ -7,7 +7,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
-from .models import DEFAULT_TOKEN_SCOPES, CredentialType, LLMKeyStatus
+from .models import CredentialType, LLMKeyStatus
 
 
 # ===== 凭证 =====
@@ -36,12 +36,6 @@ class CredentialUpdate(BaseModel):
     rotation_days: int | None = None
     rotation_note: str | None = None
     tags: list[str] | None = None
-
-
-class RotateRequest(BaseModel):
-    """轮换请求体：新明文值通过 body 传输，避免 URL 日志泄漏。"""
-    new_value: str = Field(..., min_length=1)
-    note: str | None = None
 
 
 class CredentialOut(BaseModel):
@@ -137,7 +131,7 @@ class ChangePasswordRequest(BaseModel):
 
 class TokenCreate(BaseModel):
     name: str
-    scopes: list[str] = Field(default_factory=lambda: list(DEFAULT_TOKEN_SCOPES))
+    scopes: list[str] = Field(default_factory=lambda: ["*"])
     expires_in_hours: int | None = None
 
 

@@ -38,13 +38,6 @@ def _utcnow() -> datetime:
     return datetime.utcnow()
 
 
-# API Token 默认 scope：只读集合（H14）。
-# 出于最小权限原则，未显式指定 scope 的新 token 只能读取凭证元数据与
-# LLM key/用量信息，不能写入、揭示明文或调用 LLM。需要更高权限时由
-# 创建者显式指定。
-DEFAULT_TOKEN_SCOPES: list[str] = ["credentials:read", "llm:read"]
-
-
 def _uuid() -> str:
     return uuid.uuid4().hex
 
@@ -230,7 +223,7 @@ class APIToken(Base):
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     # token_hash = sha256(token) 的 hex，明文 token 仅在创建时返回一次
     token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
-    scopes: Mapped[list] = mapped_column(JSON, default=lambda: list(DEFAULT_TOKEN_SCOPES))  # ["credentials:read", ...]
+    scopes: Mapped[list] = mapped_column(JSON, default=lambda: ["*"])  # ["credentials:read", ...]
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

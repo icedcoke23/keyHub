@@ -214,8 +214,7 @@ def test_key(
         latency_ms = int((time.monotonic() - t0) * 1000)
 
         if r.status_code >= 400:
-            # 不回传上游响应体（可能含 key 回显/内部细节），仅暴露状态码
-            error_msg = f"upstream returned {r.status_code}"
+            error_msg = f"upstream {r.status_code}: {r.text[:200]}"
         else:
             try:
                 resp_json = r.json()
@@ -229,12 +228,7 @@ def test_key(
             success = True
     except (httpx.RequestError, ValueError) as e:
         latency_ms = int((time.monotonic() - t0) * 1000)
-        # ValueError（如 JSON 解析）消息受控可回传；httpx.RequestError
-        # 可能含内部主机名/URL，统一转为通用网络错误提示
-        if isinstance(e, ValueError):
-            error_msg = str(e)
-        else:
-            error_msg = "network error: failed to reach upstream"
+        error_msg = str(e)
 
     if success:
         balancer.mark_ok(key_id, latency_ms)

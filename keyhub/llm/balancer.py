@@ -76,8 +76,6 @@ class KeyBalancer:
                 inst._half_open: dict[str, float] = {}
                 inst._inflight: dict[str, int] = {}
                 inst._state_lock = threading.Lock()
-                inst._last_self_heal = 0.0  # type: ignore[attr-defined]
-                inst._self_heal_interval = 30.0  # type: ignore[attr-defined]
                 cls._instance = inst
             return cls._instance
 
@@ -142,14 +140,7 @@ class KeyBalancer:
                 self._inflight[key_id] = 0
 
     def _cleanup(self, now_ts: float) -> None:
-        """清理过期的熔断器内存状态，并自愈 DB 中过期的 circuit_breaker key。
-
-        修复 H8：原先冷却到期后仅清理内存追踪，DB 中 status 仍为
-        circuit_breaker，导致 key 永久不可选。现在主动将 cooldown 已
-        过期的 circuit_breaker key 重置为 active，覆盖：
-        - 内存追踪的过期 key
-        - 进程重启后遗留的过期 CB key（内存丢失但 DB 仍在）
-        """
+        """清理过期的熔断器状态。"""
         with self._state_lock:
             expired = [
                 k for k, v in self._cb_open_until.items()
@@ -159,31 +150,6 @@ class KeyBalancer:
                 self._fail_counts.pop(k, None)
                 self._cb_open_until.pop(k, None)
                 self._half_open.pop(k, None)
-
-        # DB 自愈（节流：每 _self_heal_interval 秒最多一次，UPDATE 幂等）
-        with self._state_lock:
-            due = now_ts - self._last_self_heal >= self._self_heal_interval
-            if due:
-                self._last_self_heal = now_ts
-        if due:
-            self._self_heal_db()
-
-    def _self_heal_db(self) -> None:
-        """将 cooldown_until 已过期的 circuit_breaker key 重置为 active。"""
-        try:
-            now = datetime.utcnow()
-            with session_scope() as s:
-                s.execute(
-                    update(LLMKey)
-                    .where(
-                        LLMKey.status == LLMKeyStatus.circuit_breaker,
-                        LLMKey.cooldown_until.is_not(None),
-                        LLMKey.cooldown_until < now,
-                    )
-                    .values(status=LLMKeyStatus.active, cooldown_until=None)
-                )
-        except Exception:
-            pass
 
     def _query_active_keys(self, provider: Optional[str], model: Optional[str] = None) -> list[LLMKey]:
         now = datetime.utcnow()

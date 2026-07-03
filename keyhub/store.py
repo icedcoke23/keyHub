@@ -29,13 +29,11 @@ from .schemas import (
 
 
 def _encrypt(value: str, aad: bytes | None = None) -> bytes:
-    with get_runtime().with_vault() as v:
-        return v.encrypt(value, aad=aad)
+    return get_runtime().vault.encrypt(value, aad=aad)
 
 
 def _decrypt(blob: bytes, aad: bytes | None = None) -> str:
-    with get_runtime().with_vault() as v:
-        return v.decrypt(blob, aad=aad)
+    return get_runtime().vault.decrypt(blob, aad=aad)
 
 
 def _make_aad(cred_id: str, name: str) -> bytes:

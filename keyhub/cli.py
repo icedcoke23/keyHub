@@ -20,7 +20,6 @@ from rich.table import Table
 from .config import get_settings
 from .db import init_db, session_scope
 from .runtime import get_runtime
-from .structured_logging import safe_detail
 
 app = typer.Typer(no_args_is_help=True, help="KeyHub — 个人密钥与 LLM 凭证管理")
 console = Console()
@@ -616,7 +615,7 @@ def proxy(
         except Exception as e:
             return JSONResponse(
                 status_code=500,
-                content={"error": {"message": safe_detail(e, "proxy error"), "type": "proxy_error"}},
+                content={"error": {"message": str(e), "type": "proxy_error"}},
             )
 
     @proxy_fastapi.get("/healthz")
