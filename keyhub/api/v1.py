@@ -24,7 +24,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from sqlalchemy import select
 
 from ..audit import record as audit_record
-from ..auth import require_auth
+from ..auth import require_scope
 from ..config import get_settings
 from ..db import session_scope
 from ..llm.aliases import get_alias_manager
@@ -77,7 +77,7 @@ def _openai_error(
 
 
 @router.post("/chat/completions")
-def chat_completions(body: dict[str, Any], actor: str = Depends(require_auth)):
+def chat_completions(body: dict[str, Any], actor: str = Depends(require_scope("llm:chat"))):
     """OpenAI 兼容的聊天补全端点。
 
     请求体为 OpenAI 格式 dict；可选 keyhub_provider 字段显式指定供应商，
@@ -156,7 +156,7 @@ def chat_completions(body: dict[str, Any], actor: str = Depends(require_auth)):
 
 
 @router.get("/models")
-def list_models(actor: str = Depends(require_auth)):
+def list_models(actor: str = Depends(require_scope("llm:read"))):
     """聚合已配置 LLM Key 的可用模型，返回 OpenAI 风格的列表。
 
     某 key 配置了 allowed_models → 列出这些模型；
@@ -181,7 +181,7 @@ def list_models(actor: str = Depends(require_auth)):
 
 
 @router.post("/embeddings")
-def embeddings(body: dict[str, Any], actor: str = Depends(require_auth)):
+def embeddings(body: dict[str, Any], actor: str = Depends(require_scope("llm:chat"))):
     """OpenAI 兼容的文本向量端点。
 
     从 model 名推断 provider，选 key、解密后直接调用上游 /v1/embeddings，

@@ -282,9 +282,12 @@ window.copySecret = async function () {
 window.rotate = async function (name) {
   const nv = prompt(`轮换 ${name}\n输入新明文值：`);
   if (nv === null) return;
-  if (!nv) { toast('新值不能为空', 'error'); return; }
+  if (!nv || !nv.trim()) { toast('新值不能为空', 'error'); return; }
   try {
-    await api(`/api/credentials/${encodeURIComponent(name)}/rotate?new_value=${encodeURIComponent(nv)}`, { method: 'POST' });
+    await api(`/api/credentials/${encodeURIComponent(name)}/rotate`, {
+      method: 'POST',
+      body: JSON.stringify({ new_value: nv }),
+    });
     toast(`${name} 已轮换`, 'success');
     loadCreds();
   } catch (e) { toast(e.message, 'error'); }

@@ -16,6 +16,7 @@ from ..schemas import (
     CredentialSecret,
     CredentialUpdate,
     MessageOut,
+    RotateRequest,
     RotationLogOut,
 )
 from ..store import (
@@ -242,12 +243,11 @@ def update(name: str, body: CredentialUpdate, actor: str = Depends(require_scope
 @router.post("/{name}/rotate", response_model=CredentialOut)
 def rotate(
     name: str,
-    new_value: str = Query(..., description="new plaintext value"),
-    note: str | None = Query(None),
+    body: RotateRequest,
     actor: str = Depends(require_scope("credentials:write")),
 ):
     try:
-        return rotate_credential(name, new_value, note, actor=actor)
+        return rotate_credential(name, body.new_value, body.note, actor=actor)
     except KeyError:
         raise HTTPException(404, f"credential '{name}' not found")
 
@@ -262,11 +262,11 @@ def delete(name: str, actor: str = Depends(require_scope("credentials:write"))):
 
 
 @router.get("/{name}/health")
-def health_check(name: str, _: str = Depends(require_scope("credentials:read"))):
+def health_check(name: str, actor: str = Depends(require_scope("credentials:reveal"))):
     from ..store import reveal_credential as _reveal, list_credentials as _list
     from ..crypto import password_strength
     try:
-        secret = _reveal(name, actor="health-check")
+        secret = _reveal(name, actor=actor)
     except KeyError:
         raise HTTPException(404, f"credential '{name}' not found")
     strength = password_strength(secret.value)
@@ -276,7 +276,7 @@ def health_check(name: str, _: str = Depends(require_scope("credentials:read")))
         if c.name == name:
             continue
         try:
-            other = _reveal(c.name, actor="health-check")
+            other = _reveal(c.name, actor=actor)
             if other.value == secret.value:
                 duplicates.append(c.name)
         except Exception:

@@ -38,6 +38,12 @@ class CredentialUpdate(BaseModel):
     tags: list[str] | None = None
 
 
+class RotateRequest(BaseModel):
+    """轮换请求体：新明文值通过 body 传输，避免 URL 日志泄漏。"""
+    new_value: str = Field(..., min_length=1)
+    note: str | None = None
+
+
 class CredentialOut(BaseModel):
     id: str
     name: str

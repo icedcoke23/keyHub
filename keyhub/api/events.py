@@ -14,7 +14,7 @@ from typing import Any
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 
-from ..auth import require_auth
+from ..auth import require_scope
 
 router = APIRouter(prefix="/api/events", tags=["events"])
 
@@ -89,7 +89,7 @@ async def _audit_event_generator(actor: str):
 
 
 @router.get("/audit")
-async def audit_events(actor: str = Depends(require_auth)):
+async def audit_events(actor: str = Depends(require_scope("audit:read"))):
     """审计日志实时 SSE 流。
 
     前端通过 EventSource 订阅，收到 data 为 JSON 格式的审计日志条目。

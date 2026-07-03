@@ -56,6 +56,11 @@ class Settings(BaseSettings):
 
     # 空闲自动锁定（秒），0 = 禁用
     auto_lock_idle_seconds: int = 1800
+    # 可信代理数量：仅当请求经过恰好 N 层可信反代时才信任 X-Forwarded-For。
+    # 0 = 完全不信任 XFF，始终用 request.client.host（适用于直连或未知反代）。
+    # 1 = 信任 1 层反代（取 XFF 最后一个 IP）。
+    # 部署在 Nginx/CDN 后建议设为对应层数。
+    trusted_proxy_depth: int = 0
     # API Token 速率限制（每分钟请求数，0 = 禁用）
     token_rpm_limit: int = 60
     # 每 Key RPM 限制（每分钟请求数，0 = 禁用）
